@@ -214,10 +214,20 @@ export class QemuNetworkBackend extends EventEmitter {
         onTcpResume: (message) => this.handleTcpResume(message),
       },
       allowTcpFlow: (info) => {
+        if (info.protocol !== "http" && info.protocol !== "tls") {
+          if (this.options.debug) {
+            this.emit(
+              "log",
+              `[net] tcp blocked ${info.srcIP}:${info.srcPort} -> ${info.dstIP}:${info.dstPort} (${info.protocol})`
+            );
+          }
+          return false;
+        }
+
         const session = this.tcpSessions.get(info.key);
         if (session) {
           session.protocol = info.protocol;
-          if (info.protocol === "http") {
+          if (info.protocol === "http" || info.protocol === "tls") {
             session.http = session.http ?? {
               buffer: Buffer.alloc(0),
               processing: false,
@@ -275,6 +285,13 @@ export class QemuNetworkBackend extends EventEmitter {
   }
 
   private handleUdpSend(message: UdpSendMessage) {
+    if (message.dstPort !== 53) {
+      if (this.options.debug) {
+        this.emit("log", `[net] udp blocked ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort}`);
+      }
+      return;
+    }
+
     let session = this.udpSessions.get(message.key);
     if (!session) {
       const socket = dgram.createSocket("udp4");
@@ -288,7 +305,7 @@ export class QemuNetworkBackend extends EventEmitter {
       this.udpSessions.set(message.key, session);
 
       socket.on("message", (data, rinfo) => {
-        if (this.options.debug && session!.dstPort === 53) {
+        if (this.options.debug) {
           this.emit("log", `[net] udp recv ${rinfo.address}:${rinfo.port} -> ${session!.srcIP}:${session!.srcPort} (${data.length} bytes)`);
         }
         this.stack?.handleUdpResponse({
@@ -306,7 +323,7 @@ export class QemuNetworkBackend extends EventEmitter {
       });
     }
 
-    if (this.options.debug && message.dstPort === 53) {
+    if (this.options.debug) {
       this.emit("log", `[net] udp send ${message.srcIP}:${message.srcPort} -> ${message.dstIP}:${message.dstPort} (${message.payload.length} bytes)`);
     }
     session.socket.send(message.payload, message.dstPort, message.dstIP);
