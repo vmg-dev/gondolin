@@ -14,6 +14,7 @@ IMAGE_OUT ?= ./image/out
 IMAGE_INITRAMFS ?= $(IMAGE_OUT)/initramfs.cpio.gz
 IMAGE_INIT ?= ./image/init
 SANDBOXD_BIN ?= $(CURDIR)/zig-out/bin/sandboxd
+SANDBOXFS_BIN ?= $(CURDIR)/zig-out/bin/sandboxfs
 
 ALPINE_BRANCH ?= v3.20
 ALPINE_MIRROR ?= https://dl-cdn.alpinelinux.org/alpine

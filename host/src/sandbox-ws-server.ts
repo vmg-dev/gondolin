@@ -115,7 +115,10 @@ export function resolveSandboxWsServerOptions(
     tmpDir,
     `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`
   );
-  const defaultNetSock = path.resolve(repoRoot, "tmp/net.sock");
+  const defaultNetSock = path.resolve(
+    tmpDir,
+    `gondolin-net-${randomUUID().slice(0, 8)}.sock`
+  );
   const defaultNetMac = "02:00:00:00:00:01";
 
   const hostArch = detectHostArch();

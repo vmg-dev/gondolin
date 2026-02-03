@@ -120,24 +120,34 @@ const FuseInitOut = extern struct {
 
 const FuseOpenIn = struct {
     flags: u32,
+    open_flags: u32,
 };
 
 const FuseReadIn = struct {
     fh: u64,
     offset: u64,
     size: u32,
+    read_flags: u32,
+    lock_owner: u64,
+    flags: u32,
+    padding: u32,
 };
 
 const FuseWriteIn = struct {
     fh: u64,
     offset: u64,
     size: u32,
+    write_flags: u32,
+    lock_owner: u64,
+    flags: u32,
+    padding: u32,
 };
 
 const FuseCreateIn = struct {
     flags: u32,
     mode: u32,
     umask: u32,
+    open_flags: u32,
 };
 
 const FuseMkdirIn = struct {
@@ -767,6 +777,7 @@ const SandboxFs = struct {
         defer response.deinit();
 
         if (response.err != 0) {
+            log.err("create failed name='{s}' flags=0x{x} err={}", .{ name, create.flags, response.err });
             try sendError(self.fuse_fd, header.unique, errnoFromResponse(response.err));
             return;
         }
@@ -886,10 +897,17 @@ fn makeZ(allocator: std.mem.Allocator, text: []const u8) ![:0]u8 {
 }
 
 fn openRpcPort(path: []const u8) ?std.posix.fd_t {
-    return std.posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch {
-        const expected = std.fs.path.basename(path);
-        return openVirtioPortByName(expected);
-    };
+    const expected = std.fs.path.basename(path);
+    var attempts: usize = 0;
+    while (attempts < 50) : (attempts += 1) {
+        if (std.posix.open(path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)) |fd| {
+            return fd;
+        } else |_| {
+            if (openVirtioPortByName(expected)) |fd| return fd;
+        }
+        std.posix.nanosleep(0, 100 * std.time.ns_per_ms);
+    }
+    return null;
 }
 
 fn openVirtioPortByName(expected: []const u8) ?std.posix.fd_t {
@@ -972,7 +990,9 @@ fn parseFuseInit(payload: []const u8) !FuseInitIn {
 
 fn parseOpen(payload: []const u8) !FuseOpenIn {
     var offset: usize = 0;
-    return .{ .flags = try readU32(payload, &offset) };
+    const flags = try readU32(payload, &offset);
+    const open_flags = try readU32(payload, &offset);
+    return .{ .flags = flags, .open_flags = open_flags };
 }
 
 fn parseRead(payload: []const u8) !FuseReadIn {
@@ -980,7 +1000,19 @@ fn parseRead(payload: []const u8) !FuseReadIn {
     const fh = try readU64(payload, &offset);
     const off = try readU64(payload, &offset);
     const size = try readU32(payload, &offset);
-    return .{ .fh = fh, .offset = off, .size = size };
+    const read_flags = try readU32(payload, &offset);
+    const lock_owner = try readU64(payload, &offset);
+    const flags = try readU32(payload, &offset);
+    const padding = try readU32(payload, &offset);
+    return .{
+        .fh = fh,
+        .offset = off,
+        .size = size,
+        .read_flags = read_flags,
+        .lock_owner = lock_owner,
+        .flags = flags,
+        .padding = padding,
+    };
 }
 
 fn parseWrite(payload: []const u8) !FuseWriteIn {
@@ -988,7 +1020,19 @@ fn parseWrite(payload: []const u8) !FuseWriteIn {
     const fh = try readU64(payload, &offset);
     const off = try readU64(payload, &offset);
     const size = try readU32(payload, &offset);
-    return .{ .fh = fh, .offset = off, .size = size };
+    const write_flags = try readU32(payload, &offset);
+    const lock_owner = try readU64(payload, &offset);
+    const flags = try readU32(payload, &offset);
+    const padding = try readU32(payload, &offset);
+    return .{
+        .fh = fh,
+        .offset = off,
+        .size = size,
+        .write_flags = write_flags,
+        .lock_owner = lock_owner,
+        .flags = flags,
+        .padding = padding,
+    };
 }
 
 fn parseCreate(payload: []const u8) !FuseCreateIn {
@@ -996,7 +1040,8 @@ fn parseCreate(payload: []const u8) !FuseCreateIn {
     const flags = try readU32(payload, &offset);
     const mode = try readU32(payload, &offset);
     const umask = try readU32(payload, &offset);
-    return .{ .flags = flags, .mode = mode, .umask = umask };
+    const open_flags = try readU32(payload, &offset);
+    return .{ .flags = flags, .mode = mode, .umask = umask, .open_flags = open_flags };
 }
 
 fn parseMkdir(payload: []const u8) !FuseMkdirIn {
