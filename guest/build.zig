@@ -28,14 +28,23 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const mod_tests = b.addTest(.{
+        .name = "sandboxd-mod-tests",
         .root_module = mod,
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{
+        .name = "sandboxd-exe-tests",
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+
+    const mod_tests_install = b.addInstallArtifact(mod_tests, .{ .dest_sub_path = "sandboxd-mod-tests" });
+    const exe_tests_install = b.addInstallArtifact(exe_tests, .{ .dest_sub_path = "sandboxd-exe-tests" });
+
+    const test_bins = b.step("test-bins", "Build test binaries for guest execution");
+    test_bins.dependOn(&mod_tests_install.step);
+    test_bins.dependOn(&exe_tests_install.step);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);

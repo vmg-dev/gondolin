@@ -4,6 +4,7 @@ RUN_PARALLEL ?= ../scripts/run-parallel
 
 ZIG ?= zig
 OPTIMIZE ?= ReleaseSmall
+TSX ?= ../host/node_modules/.bin/tsx
 
 ZIG_SOURCES := $(shell find src -name '*.zig') build.zig
 
@@ -126,8 +127,9 @@ lint:
 typecheck: build
 
 
-test:
-	$(ZIG) build test -Doptimize=$(OPTIMIZE)
+test: image kernel
+	$(ZIG) build test-bins -Doptimize=$(OPTIMIZE)
+	$(TSX) ../host/bin/guest-tests.ts
 
 clean:
 	rm -rf zig-cache zig-out
