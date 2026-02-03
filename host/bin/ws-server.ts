@@ -48,6 +48,9 @@ function parseArgs(argv: string[]): SandboxWsServerOptions {
       case "--net-sock":
         args.netSocketPath = argv[++i];
         break;
+      case "--virtio-fs-sock":
+        args.virtioFsSocketPath = argv[++i];
+        break;
       case "--net-mac":
         args.netMac = argv[++i];
         break;
@@ -99,6 +102,7 @@ function usage() {
   console.log(`  --memory SIZE        Memory size (default ${defaults.memory})`);
   console.log(`  --cpus N             vCPU count (default ${defaults.cpus})`);
   console.log("  --virtio-sock PATH   Virtio serial socket path");
+  console.log("  --virtio-fs-sock PATH Virtio filesystem socket path");
   console.log("  --net-sock PATH      QEMU net socket path");
   console.log("  --net-mac MAC        MAC address for virtio-net");
   console.log("  --no-net             Disable QEMU net backend");

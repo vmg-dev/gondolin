@@ -100,7 +100,7 @@ if [ -x /usr/bin/sandboxfs ]; then
   if [ -z "${SANDBOXFS_LOG}" ]; then
     SANDBOXFS_LOG="/dev/null"
   fi
-  /usr/bin/sandboxfs --mount /data --rpc-path /dev/vport0p2 > "${SANDBOXFS_LOG}" 2>&1 &
+  /usr/bin/sandboxfs --mount /data --rpc-path /dev/virtio-ports/virtio-fs > "${SANDBOXFS_LOG}" 2>&1 &
 fi
 
 log "[init] starting sandboxd"

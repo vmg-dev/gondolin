@@ -1,6 +1,8 @@
 import fs from "fs";
 import net from "net";
+import os from "os";
 import path from "path";
+import { randomUUID } from "crypto";
 import { execSync } from "child_process";
 import { EventEmitter } from "events";
 
@@ -26,11 +28,12 @@ import { SandboxController, SandboxConfig, SandboxState } from "./sandbox-contro
 import { QemuNetworkBackend } from "./qemu-net";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import type { SandboxPolicy } from "./policy";
-import type { SandboxVfsProvider } from "./vfs";
+import { FsRpcService, type SandboxVfsProvider } from "./vfs";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_MAX_JSON_BYTES = 256 * 1024;
 const DEFAULT_MAX_STDIN_BYTES = 64 * 1024;
+const { errno: ERRNO } = os.constants;
 
 export type SandboxWsServerOptions = {
   host?: string;
@@ -41,6 +44,7 @@ export type SandboxWsServerOptions = {
   memory?: string;
   cpus?: number;
   virtioSocketPath?: string;
+  virtioFsSocketPath?: string;
   netSocketPath?: string;
   netMac?: string;
   netEnabled?: boolean;
@@ -75,6 +79,7 @@ type ResolvedServerOptions = {
   memory: string;
   cpus: number;
   virtioSocketPath: string;
+  virtioFsSocketPath: string;
   netSocketPath: string;
   netMac: string;
   netEnabled: boolean;
@@ -100,7 +105,16 @@ export function resolveSandboxWsServerOptions(
   const repoRoot = path.resolve(__dirname, "../..");
   const defaultKernel = path.resolve(repoRoot, "guest/image/out/vmlinuz-virt");
   const defaultInitrd = path.resolve(repoRoot, "guest/image/out/initramfs.cpio.gz");
-  const defaultVirtio = path.resolve(repoRoot, "tmp/virtio.sock");
+  // we are running into length limits on macos on the default temp dir
+  const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+  const defaultVirtio = path.resolve(
+    tmpDir,
+    `gondolin-virtio-${randomUUID().slice(0, 8)}.sock`
+  );
+  const defaultVirtioFs = path.resolve(
+    tmpDir,
+    `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`
+  );
   const defaultNetSock = path.resolve(repoRoot, "tmp/net.sock");
   const defaultNetMac = "02:00:00:00:00:01";
 
@@ -117,6 +131,7 @@ export function resolveSandboxWsServerOptions(
     memory: options.memory ?? defaultMemory,
     cpus: options.cpus ?? 1,
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
+    virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
@@ -405,9 +420,11 @@ export class SandboxWsServer extends EventEmitter {
   private readonly options: ResolvedServerOptions;
   private readonly controller: SandboxController;
   private readonly bridge: VirtioBridge;
+  private readonly fsBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
   private wss: WebSocketServer | null = null;
   private vfsProvider: SandboxVfsProvider | null;
+  private fsService: FsRpcService | null = null;
   private inflight = new Map<number, WebSocket>();
   private stdinAllowed = new Set<number>();
   private startPromise: Promise<SandboxWsServerAddress> | null = null;
@@ -433,6 +450,7 @@ export class SandboxWsServer extends EventEmitter {
       memory: this.options.memory,
       cpus: this.options.cpus,
       virtioSocketPath: this.options.virtioSocketPath,
+      virtioFsSocketPath: this.options.virtioFsSocketPath,
       netSocketPath: this.options.netEnabled ? this.options.netSocketPath : undefined,
       netMac: this.options.netMac,
       append: this.options.append ?? `console=${consoleDevice}`,
@@ -445,6 +463,12 @@ export class SandboxWsServer extends EventEmitter {
 
     this.controller = new SandboxController(sandboxConfig);
     this.bridge = new VirtioBridge(this.options.virtioSocketPath);
+    this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
+    this.fsService = this.vfsProvider
+      ? new FsRpcService(this.vfsProvider, {
+          logger: (message) => this.emit("log", message),
+        })
+      : null;
 
     const mac = parseMac(this.options.netMac) ?? Buffer.from([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
     this.network = this.options.netEnabled
@@ -474,6 +498,7 @@ export class SandboxWsServer extends EventEmitter {
       this.status = state;
       if (state === "running") {
         this.bridge.connect();
+        this.fsBridge.connect();
       }
       if (state === "stopped") {
         this.failInflight("sandbox_stopped", "sandbox is not running");
@@ -551,10 +576,59 @@ export class SandboxWsServer extends EventEmitter {
       }
     };
 
+    this.fsBridge.onMessage = (message) => {
+      if (!isValidRequestId(message.id)) {
+        return;
+      }
+      if (message.t !== "fs_request") {
+        return;
+      }
+      if (!this.fsService) {
+        this.fsBridge.send({
+          v: 1,
+          t: "fs_response",
+          id: message.id,
+          p: {
+            op: message.p.op,
+            err: ERRNO.ENOSYS,
+            message: "filesystem service unavailable",
+          },
+        });
+        return;
+      }
+
+      void this.fsService
+        .handleRequest(message)
+        .then((response) => {
+          if (!this.fsBridge.send(response)) {
+            this.emit("error", new Error("[fs] virtio bridge queue exceeded"));
+          }
+        })
+        .catch((err) => {
+          const detail = err instanceof Error ? err.message : "fs handler error";
+          this.fsBridge.send({
+            v: 1,
+            t: "fs_response",
+            id: message.id,
+            p: {
+              op: message.p.op,
+              err: ERRNO.EIO,
+              message: detail,
+            },
+          });
+          this.emit("error", err instanceof Error ? err : new Error(detail));
+        });
+    };
+
     this.bridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
       this.emit("error", new Error(`[virtio] decode error: ${message}`));
       this.failInflight("protocol_error", "virtio decode error");
+    };
+
+    this.fsBridge.onError = (err) => {
+      const message = err instanceof Error ? err.message : "unknown error";
+      this.emit("error", new Error(`[fs] decode error: ${message}`));
     };
   }
 
@@ -576,6 +650,10 @@ export class SandboxWsServer extends EventEmitter {
 
   getVfsProvider() {
     return this.vfsProvider;
+  }
+
+  getFsMetrics() {
+    return this.fsService?.metrics ?? null;
   }
 
   setPolicy(policy: SandboxPolicy | null) {
@@ -631,6 +709,7 @@ export class SandboxWsServer extends EventEmitter {
 
     this.network?.start();
     this.bridge.connect();
+    this.fsBridge.connect();
     void this.controller.start();
 
     const address = await new Promise<SandboxWsServerAddress>((resolve, reject) => {
@@ -662,6 +741,8 @@ export class SandboxWsServer extends EventEmitter {
     this.failInflight("server_shutdown", "server is shutting down");
     await this.controller.stop();
     this.bridge.disconnect();
+    this.fsBridge.disconnect();
+    await this.fsService?.close();
     this.network?.stop();
 
     if (this.wss) {

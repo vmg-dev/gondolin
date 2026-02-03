@@ -84,6 +84,7 @@ fn scanVirtioPorts() !?std.fs.File {
     var path_buf: [64]u8 = undefined;
     while (try it.next()) |entry| {
         if (!std.mem.startsWith(u8, entry.name, "vport")) continue;
+        if (!virtioPortMatches(entry.name, "virtio-port")) continue;
         const path = try std.fmt.bufPrint(&path_buf, "/dev/{s}", .{entry.name});
         if (try tryOpenVirtioPath(path)) |file| return file;
     }
@@ -91,10 +92,20 @@ fn scanVirtioPorts() !?std.fs.File {
     return null;
 }
 
+fn virtioPortMatches(port_name: []const u8, expected: []const u8) bool {
+    var path_buf: [128]u8 = undefined;
+    const sys_path = std.fmt.bufPrint(&path_buf, "/sys/class/virtio-ports/{s}/name", .{port_name}) catch return false;
+    var file = std.fs.openFileAbsolute(sys_path, .{}) catch return false;
+    defer file.close();
+
+    var name_buf: [64]u8 = undefined;
+    const size = file.readAll(&name_buf) catch return false;
+    const trimmed = std.mem.trim(u8, name_buf[0..size], " \r\n\t");
+    return std.mem.eql(u8, trimmed, expected);
+}
+
 fn openVirtioPort() !std.fs.File {
     const paths = [_][]const u8{
-        "/dev/vport0p1",
-        "/dev/vport0p0",
         "/dev/virtio-ports/virtio-port",
     };
 

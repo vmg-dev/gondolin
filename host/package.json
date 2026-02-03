@@ -7,7 +7,7 @@
     "start": "node dist/bin/gondolin.js exec",
     "dev": "tsx bin/gondolin.ts exec",
     "dev:ws": "tsx bin/gondolin.ts ws-server",
-    "test": "tsx --test test/ws.test.ts",
+    "test": "tsx --test test/*.test.ts",
     "test:ws": "tsx --test test/ws.test.ts",
     "bash": "tsx bin/gondolin.ts bash",
     "gondolin": "tsx bin/gondolin.ts"

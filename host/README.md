@@ -19,6 +19,17 @@ VM.
 - SandboxPolicy allow/deny rules are defined but not enforced for DNS/HTTP/TLS.
 - Generic TCP/UDP passthrough (beyond HTTP/TLS + DNS) is not supported.
 
+## Networking approach
+
+Instead of attaching the VM to a real bridge/tap device, QEMU streams raw
+Ethernet frames over a Unix socket into a TypeScript network stack.  That stack
+decodes ARP/IP/TCP/UDP and deliberately only allows HTTP and TLS.  When an HTTP
+flow is detected (or TLS that can be MITM'ed), the host intercepts the request
+in JavaScript and replays it via `fetch`.  This gives a single, portable control
+point for policy enforcement, logging, and request/response hooks without
+granting the guest arbitrary socket access or requiring privileged host network
+setup.
+
 ## Filesystem hooks
 
 `VM` can expose a hookable VFS provider (defaults to an in-memory backend). Pass

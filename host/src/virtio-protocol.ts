@@ -54,7 +54,7 @@ export type FsResponse = {
   };
 };
 
-export type IncomingMessage = ExecOutput | ExecResponse | ErrorResponse | FsResponse;
+export type IncomingMessage = ExecOutput | ExecResponse | ErrorResponse | FsRequest | FsResponse;
 
 export type ExecRequest = {
   v: number;

@@ -809,7 +809,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     var mount_point: []const u8 = "/data";
-    var rpc_path: []const u8 = "/dev/vport0p2";
+    var rpc_path: []const u8 = "/dev/virtio-ports/virtio-fs";
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {

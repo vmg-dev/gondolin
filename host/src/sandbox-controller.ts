@@ -9,6 +9,7 @@ export type SandboxConfig = {
   memory: string;
   cpus: number;
   virtioSocketPath: string;
+  virtioFsSocketPath: string;
   append: string;
   machineType?: string;
   accel?: string;
@@ -156,11 +157,19 @@ function buildQemuArgs(config: SandboxConfig) {
     "-chardev",
     `socket,id=virtiocon0,path=${config.virtioSocketPath},server=off`
   );
+  args.push(
+    "-chardev",
+    `socket,id=virtiofs0,path=${config.virtioFsSocketPath},server=off`
+  );
 
   args.push("-device", "virtio-serial-pci,id=virtio-serial0");
   args.push(
     "-device",
     "virtserialport,chardev=virtiocon0,name=virtio-port,bus=virtio-serial0.0"
+  );
+  args.push(
+    "-device",
+    "virtserialport,chardev=virtiofs0,name=virtio-fs,bus=virtio-serial0.0"
   );
 
   if (config.netSocketPath) {
