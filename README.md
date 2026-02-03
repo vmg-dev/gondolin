@@ -12,12 +12,17 @@ objects from other realms are passed to it, which is tricky to prevent.  The RFC
 calls for isolating untrusted code by running a full Unix guest with strong
 host-level isolation, while preserving a fast and developer-friendly workflow.
 
-Key motivations from the RFC:
+Key motivations:
 
 - Strong isolation between tenants to prevent cross-account access.
-- Guard network and filesystem access with explicit policy.
+- Guard network and filesystem access with explicit policy that can be code controlled.
 - Fast create/exec/teardown for LLM workflows.
 - Development parity between macOS and production Linux.
+
+## Components
+
+- [`guest/`](guest/) — Zig-based `sandboxd` daemon, Alpine initramfs build, and QEMU helpers.
+- [`host/`](host/) — TypeScript host controller + WebSocket server.
 
 ## Design
 
@@ -31,9 +36,3 @@ Key motivations from the RFC:
   HTTPS MITM.
 - **Dev/prod parity:** identical guest image + RPC; only QEMU accel flags vary
   (HVF on macOS, KVM on Linux).
-
-## Repository layout
-
-- `guest/` — Zig-based `sandboxd` daemon, Alpine initramfs build, and QEMU helpers.
-- `host/` — TypeScript host controller + WebSocket server.
-- `plans/` — POC plan, protocol draft, and follow-up roadmap.
