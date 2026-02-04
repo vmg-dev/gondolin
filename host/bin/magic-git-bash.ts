@@ -47,7 +47,7 @@ class MagicGitProvider extends VirtualProviderClass implements VirtualProvider {
       throw createErrnoError(ERRNO.EROFS, "open", entryPath);
     }
     const resolved = this.resolve(entryPath);
-    if (resolved.kind !== "repo") {
+    if (resolved.kind !== "repo" || isRepoRoot(resolved)) {
       throw createErrnoError(ERRNO.EISDIR, "open", entryPath);
     }
     return this.getRepoProvider(resolved).openSync(resolved.relativePath, flags, mode);
@@ -60,6 +60,9 @@ class MagicGitProvider extends VirtualProviderClass implements VirtualProvider {
   statSync(entryPath: string, options?: object) {
     const resolved = this.resolve(entryPath);
     if (resolved.kind === "repo") {
+      if (isRepoRoot(resolved)) {
+        return createVirtualDirStats();
+      }
       return this.getRepoProvider(resolved).statSync(resolved.relativePath, options);
     }
     if (resolved.kind === "owner") {
@@ -75,6 +78,9 @@ class MagicGitProvider extends VirtualProviderClass implements VirtualProvider {
   lstatSync(entryPath: string, options?: object) {
     const resolved = this.resolve(entryPath);
     if (resolved.kind === "repo") {
+      if (isRepoRoot(resolved)) {
+        return createVirtualDirStats();
+      }
       return this.getRepoProvider(resolved).lstatSync(resolved.relativePath, options);
     }
     if (resolved.kind === "owner") {
@@ -140,6 +146,9 @@ class MagicGitProvider extends VirtualProviderClass implements VirtualProvider {
   readlinkSync(entryPath: string, options?: object) {
     const resolved = this.resolve(entryPath);
     if (resolved.kind === "repo") {
+      if (isRepoRoot(resolved)) {
+        throw createErrnoError(ERRNO.EINVAL, "readlink", entryPath);
+      }
       const provider = this.getRepoProvider(resolved);
       if (provider.readlinkSync) {
         return provider.readlinkSync(resolved.relativePath, options);
@@ -164,6 +173,9 @@ class MagicGitProvider extends VirtualProviderClass implements VirtualProvider {
   realpathSync(entryPath: string, options?: object) {
     const resolved = this.resolve(entryPath);
     if (resolved.kind === "repo") {
+      if (isRepoRoot(resolved)) {
+        return normalizePath(entryPath);
+      }
       const provider = this.getRepoProvider(resolved);
       if (provider.realpathSync) {
         return provider.realpathSync(resolved.relativePath, options);
@@ -180,6 +192,9 @@ class MagicGitProvider extends VirtualProviderClass implements VirtualProvider {
   accessSync(entryPath: string, mode?: number) {
     const resolved = this.resolve(entryPath);
     if (resolved.kind === "repo") {
+      if (isRepoRoot(resolved)) {
+        return;
+      }
       const provider = this.getRepoProvider(resolved);
       if (provider.accessSync) {
         return provider.accessSync(resolved.relativePath, mode);
@@ -317,6 +332,10 @@ function normalizePath(inputPath: string) {
     normalized = normalized.slice(0, -1);
   }
   return normalized;
+}
+
+function isRepoRoot(resolved: Extract<ResolvedPath, { kind: "repo" }>) {
+  return resolved.relativePath === "/";
 }
 
 function isWriteFlag(flags: string): boolean {
