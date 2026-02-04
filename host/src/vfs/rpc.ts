@@ -1,3 +1,21 @@
+/**
+ * RPC client for guest FUSE filesystem operations.
+ *
+ * ## Protocol Conventions
+ * - Paths: UTF-8, absolute, normalized with forward slashes, no trailing slash (except "/")
+ * - Names: single path component (no "/" or NUL)
+ * - Errors: responses include `err` (POSIX errno, 0 = success) and optional `message`
+ * - Payload limit: read/write data capped at 60 KiB per request to keep frames under 64 KiB
+ * - Handles: host returns opaque `fh` (u64) for open/create; guest passes back for read/write/release
+ *
+ * ## Caching
+ * Host may provide `entry_ttl_ms` and `attr_ttl_ms` in responses. Guest caches entries
+ * for the specified duration (default 1000ms). Negative lookups (ENOENT) cache for
+ * `entry_ttl_ms` (default 250ms) to avoid repeated failed lookups.
+ *
+ * Root inode is always 1 and implicitly known at mount time.
+ */
+
 import net from "net";
 import path from "path";
 import fs from "node:fs";

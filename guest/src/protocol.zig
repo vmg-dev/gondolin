@@ -1,3 +1,21 @@
+//! Virtio-serial RPC protocol for guest ↔ host communication.
+//!
+//! ## Framing
+//! Messages are length-prefixed: a big-endian u32 length followed by the payload.
+//! Maximum frame size is 4 MiB.
+//!
+//! ## Encoding
+//! All payloads are CBOR-encoded maps with a standard envelope:
+//!   - `v` (u32): protocol version (currently 1)
+//!   - `t` (string): message type (e.g. "exec_request", "fs_response")
+//!   - `id` (u32): correlation ID for request/response matching
+//!   - `p` (map): type-specific payload
+//!
+//! ## Message Types
+//! Exec: exec_request, exec_response, exec_output, stdin_data, pty_resize
+//! Filesystem: fs_request, fs_response
+//! Errors: error
+
 const std = @import("std");
 const cbor = @import("cbor.zig");
 
