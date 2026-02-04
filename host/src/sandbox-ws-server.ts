@@ -17,6 +17,7 @@ import {
   encodeFrame,
 } from "./virtio-protocol";
 import {
+  BootCommandMessage,
   ClientMessage,
   ErrorMessage,
   ExecCommandMessage,
@@ -68,6 +69,11 @@ export type SandboxWsServerAddress = {
   host: string;
   port: number;
   url: string;
+};
+
+type SandboxFsConfig = {
+  fuseMount: string;
+  fuseBinds: string[];
 };
 
 type ResolvedServerOptions = {
@@ -425,6 +431,7 @@ export class SandboxWsServer extends EventEmitter {
   private readonly bridge: VirtioBridge;
   private readonly fsBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
+  private readonly baseAppend: string;
   private wss: WebSocketServer | null = null;
   private vfsProvider: SandboxVfsProvider | null;
   private fsService: FsRpcService | null = null;
@@ -436,6 +443,8 @@ export class SandboxWsServer extends EventEmitter {
   private policy: SandboxPolicy | null;
   private qemuLogBuffer = "";
   private status: SandboxState = "stopped";
+  private bootConfig: SandboxFsConfig | null = null;
+  private activeClient: WebSocket | null = null;
 
   constructor(options: SandboxWsServerOptions = {}) {
     super();
@@ -449,6 +458,7 @@ export class SandboxWsServer extends EventEmitter {
 
     const hostArch = detectHostArch();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
+    this.baseAppend = this.options.append ?? `console=${consoleDevice}`;
 
     const sandboxConfig: SandboxConfig = {
       qemuPath: this.options.qemuPath,
@@ -460,7 +470,7 @@ export class SandboxWsServer extends EventEmitter {
       virtioFsSocketPath: this.options.virtioFsSocketPath,
       netSocketPath: this.options.netEnabled ? this.options.netSocketPath : undefined,
       netMac: this.options.netMac,
-      append: this.options.append ?? `console=${consoleDevice}`,
+      append: this.baseAppend,
       machineType: this.options.machineType,
       accel: this.options.accel,
       cpu: this.options.cpu,
@@ -717,7 +727,6 @@ export class SandboxWsServer extends EventEmitter {
     this.network?.start();
     this.bridge.connect();
     this.fsBridge.connect();
-    void this.controller.start();
 
     const address = await new Promise<SandboxWsServerAddress>((resolve, reject) => {
       const handleError = (err: Error) => {
@@ -777,10 +786,22 @@ export class SandboxWsServer extends EventEmitter {
   }
 
   private handleConnection(ws: WebSocket) {
+    if (this.activeClient) {
+      sendError(ws, {
+        type: "error",
+        code: "client_busy",
+        message: "only one client connection is allowed",
+      });
+      ws.close();
+      return;
+    }
+
     if (!sendJson(ws, { type: "status", state: this.controller.getState() })) {
       ws.close();
       return;
     }
+
+    this.activeClient = ws;
 
     ws.on("message", (data, isBinary) => {
       if (isBinary) {
@@ -821,6 +842,20 @@ export class SandboxWsServer extends EventEmitter {
         return;
       }
 
+      if (message.type === "boot") {
+        void this.handleBoot(ws, message);
+        return;
+      }
+
+      if (!this.bootConfig && message.type !== "policy") {
+        sendError(ws, {
+          type: "error",
+          code: "missing_boot",
+          message: "boot configuration required before commands",
+        });
+        return;
+      }
+
       if (message.type === "exec") {
         this.handleExec(ws, message);
       } else if (message.type === "stdin") {
@@ -843,6 +878,9 @@ export class SandboxWsServer extends EventEmitter {
     });
 
     ws.on("close", () => {
+      if (this.activeClient === ws) {
+        this.activeClient = null;
+      }
       for (const [id, client] of this.inflight.entries()) {
         if (client === ws) {
           this.inflight.delete(id);
@@ -850,6 +888,41 @@ export class SandboxWsServer extends EventEmitter {
         }
       }
     });
+  }
+
+  private async handleBoot(ws: WebSocket, message: BootCommandMessage) {
+    let config: SandboxFsConfig;
+    try {
+      config = normalizeSandboxFsConfig(message);
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      sendError(ws, {
+        type: "error",
+        code: "invalid_request",
+        message: error,
+      });
+      return;
+    }
+
+    const changed = !this.bootConfig || !isSameSandboxFsConfig(this.bootConfig, config);
+    this.bootConfig = config;
+
+    const append = buildSandboxfsAppend(this.baseAppend, config);
+    this.controller.setAppend(append);
+
+    const state = this.controller.getState();
+    if (changed) {
+      if (state === "running" || state === "starting") {
+        await this.controller.restart();
+        return;
+      }
+    }
+
+    if (state === "stopped") {
+      await this.controller.start();
+    }
+
+    sendJson(ws, { type: "status", state: this.controller.getState() });
   }
 
   private handleExec(ws: WebSocket, message: ExecCommandMessage) {
@@ -974,4 +1047,63 @@ export class SandboxWsServer extends EventEmitter {
     this.inflight.clear();
     this.stdinAllowed.clear();
   }
+}
+
+function normalizeSandboxFsConfig(message: BootCommandMessage): SandboxFsConfig {
+  const fuseMount = normalizeMountPath(message.fuseMount ?? "/data", "fuseMount");
+  const fuseBinds = normalizeBindList(message.fuseBinds ?? []);
+  return {
+    fuseMount,
+    fuseBinds,
+  };
+}
+
+function normalizeMountPath(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${field} must be a non-empty string`);
+  }
+  let normalized = path.posix.normalize(value);
+  if (!normalized.startsWith("/")) {
+    throw new Error(`${field} must be an absolute path`);
+  }
+  if (normalized.length > 1 && normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+  if (normalized.includes("\0")) {
+    throw new Error(`${field} contains null bytes`);
+  }
+  return normalized;
+}
+
+function normalizeBindList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error("fuseBinds must be an array of absolute paths");
+  }
+  const seen = new Set<string>();
+  const binds: string[] = [];
+  for (const entry of value) {
+    const normalized = normalizeMountPath(entry, "fuseBinds");
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    binds.push(normalized);
+  }
+  binds.sort();
+  return binds;
+}
+
+function isSameSandboxFsConfig(left: SandboxFsConfig, right: SandboxFsConfig) {
+  if (left.fuseMount !== right.fuseMount) return false;
+  if (left.fuseBinds.length !== right.fuseBinds.length) return false;
+  for (let i = 0; i < left.fuseBinds.length; i += 1) {
+    if (left.fuseBinds[i] !== right.fuseBinds[i]) return false;
+  }
+  return true;
+}
+
+function buildSandboxfsAppend(baseAppend: string, config: SandboxFsConfig) {
+  const pieces = [baseAppend.trim(), `sandboxfs.mount=${config.fuseMount}`];
+  if (config.fuseBinds.length > 0) {
+    pieces.push(`sandboxfs.bind=${config.fuseBinds.join(",")}`);
+  }
+  return pieces.filter((piece) => piece.length > 0).join(" ").trim();
 }

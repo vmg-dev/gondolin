@@ -13,7 +13,7 @@ VM.
 - TLS MITM is implemented: a local CA + per-host leaf certs are generated under `var/mitm` and used to re-encrypt TLS.
 - UDP forwarding is limited to DNS (port 53). The guest still points at `8.8.8.8` by default.
 - A WS test (`pnpm run test:ws`) exercises guest HTTP/HTTPS fetches against icanhazip.com.
-- The `VM` client exposes a hookable VFS provider (defaults to `MemoryProvider`) for filesystem policy experiments.
+- The `VM` client exposes hookable VFS mounts (defaults to a `MemoryProvider` at `/`) for filesystem policy experiments.
 
 ## What is *not* implemented yet
 - SandboxPolicy allow/deny rules are defined but not enforced for DNS/HTTP/TLS.
@@ -32,8 +32,8 @@ setup.
 
 ## Filesystem hooks
 
-`VM` can expose a hookable VFS provider (defaults to `MemoryProvider`). Pass
-hooks or a custom provider via `vfs` (or set `vfs: null` to disable) and access
+`VM` can expose hookable VFS mounts (defaults to `MemoryProvider` at `/`). Pass
+mounts and optional hooks via `vfs` (or set `vfs: null` to disable) and access
 the provider with `getVfs()`:
 
 ```ts
@@ -42,7 +42,7 @@ import { MemoryProvider } from "./src/vfs";
 
 const vm = new VM({
   vfs: {
-    provider: new MemoryProvider(),
+    mounts: { "/": new MemoryProvider() },
     hooks: {
       before: (ctx) => console.log("before", ctx.op, ctx.path),
       after: (ctx) => console.log("after", ctx.op, ctx.path),
@@ -52,6 +52,8 @@ const vm = new VM({
 
 const vfs = vm.getVfs();
 ```
+
+Use `fuseMount` in the `vfs` options to change the guest mount point (defaults to `/data`).
 
 ## Useful commands
 - `pnpm run dev:ws -- --net-debug` to start the WS server with network debug logging.

@@ -92,15 +92,64 @@ if modprobe fuse > /dev/null 2>&1; then
   log "[init] loaded fuse"
 fi
 
-mkdir -p /data
+sandboxfs_mount="/data"
+sandboxfs_binds=""
+
+if [ -r /proc/cmdline ]; then
+  for arg in $(cat /proc/cmdline); do
+    case "${arg}" in
+      sandboxfs.mount=*)
+        sandboxfs_mount="${arg#sandboxfs.mount=}"
+        ;;
+      sandboxfs.bind=*)
+        sandboxfs_binds="${arg#sandboxfs.bind=}"
+        ;;
+    esac
+  done
+fi
+
+wait_for_sandboxfs() {
+  for i in $(seq 1 50); do
+    if grep -q " ${sandboxfs_mount} fuse.sandboxfs " /proc/mounts; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+mkdir -p "${sandboxfs_mount}"
 
 if [ -x /usr/bin/sandboxfs ]; then
-  log "[init] starting sandboxfs"
+  log "[init] starting sandboxfs at ${sandboxfs_mount}"
   SANDBOXFS_LOG="${CONSOLE:-/dev/null}"
   if [ -z "${SANDBOXFS_LOG}" ]; then
     SANDBOXFS_LOG="/dev/null"
   fi
-  /usr/bin/sandboxfs --mount /data --rpc-path /dev/virtio-ports/virtio-fs > "${SANDBOXFS_LOG}" 2>&1 &
+  /usr/bin/sandboxfs --mount "${sandboxfs_mount}" --rpc-path /dev/virtio-ports/virtio-fs > "${SANDBOXFS_LOG}" 2>&1 &
+
+  if [ -n "${sandboxfs_binds}" ]; then
+    if wait_for_sandboxfs; then
+      OLD_IFS="${IFS}"
+      IFS=","
+      for bind in ${sandboxfs_binds}; do
+        if [ -z "${bind}" ]; then
+          continue
+        fi
+        mkdir -p "${bind}"
+        if [ "${sandboxfs_mount}" = "/" ]; then
+          bind_source="${bind}"
+        else
+          bind_source="${sandboxfs_mount}${bind}"
+        fi
+        log "[init] binding sandboxfs ${bind_source} -> ${bind}"
+        log_cmd mount --bind "${bind_source}" "${bind}"
+      done
+      IFS="${OLD_IFS}"
+    else
+      log "[init] sandboxfs mount not ready for bind mounts"
+    fi
+  fi
 fi
 
 log "[init] starting sandboxd"

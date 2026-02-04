@@ -49,7 +49,7 @@ test("vfs roundtrip between host and guest", { timeout: timeoutMs, skip: Boolean
 
   const vm = new VM({
     server: { console: "none" },
-    vfs: { provider },
+    vfs: { mounts: { "/": provider } },
   });
 
   try {
@@ -100,7 +100,7 @@ test("vfs hooks can block writes", { timeout: timeoutMs, skip: Boolean(url) }, a
   const vm = new VM({
     server: { console: "none" },
     vfs: {
-      provider,
+      mounts: { "/": provider },
       hooks: {
         before: (ctx) => {
           if (ctx.op === "open" && ctx.path === "/blocked.txt" && typeof ctx.flags === "string") {

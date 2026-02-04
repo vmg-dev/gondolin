@@ -25,12 +25,19 @@ export type LifecycleCommandMessage = {
   action: "restart" | "shutdown";
 };
 
+export type BootCommandMessage = {
+  type: "boot";
+  fuseMount?: string;
+  fuseBinds?: string[];
+};
+
 export type PolicyCommandMessage = {
   type: "policy";
   policy: SandboxPolicy;
 };
 
 export type ClientMessage =
+  | BootCommandMessage
   | ExecCommandMessage
   | StdinCommandMessage
   | LifecycleCommandMessage

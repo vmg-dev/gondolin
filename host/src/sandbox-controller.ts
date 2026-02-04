@@ -32,6 +32,10 @@ export class SandboxController extends EventEmitter {
     super();
   }
 
+  setAppend(append: string) {
+    this.config.append = append;
+  }
+
   getState() {
     return this.state;
   }

@@ -18,6 +18,12 @@ import {
   VirtualProvider,
   type VfsHooks,
 } from "./vfs";
+import {
+  MountRouterProvider,
+  listMountPaths,
+  normalizeMountMap,
+  normalizeMountPath,
+} from "./vfs/mounts";
 
 const MAX_REQUEST_ID = 0xffffffff;
 const DEFAULT_STDIN_CHUNK = 32 * 1024;
@@ -59,8 +65,9 @@ export type ExecStream = {
 };
 
 export type VmVfsOptions = {
-  provider?: VirtualProvider;
+  mounts?: Record<string, VirtualProvider>;
   hooks?: VfsHooks;
+  fuseMount?: string;
 };
 
 export type VMOptions = {
@@ -113,6 +120,9 @@ export class VM {
   private nextId = 1;
   private policy: SandboxPolicy | null;
   private vfs: SandboxVfsProvider | null;
+  private readonly fuseMount: string;
+  private readonly fuseBinds: string[];
+  private bootSent = false;
 
   constructor(options: VMOptions = {}) {
     if (options.url && options.server) {
@@ -124,6 +134,9 @@ export class VM {
     this.autoStart = options.autoStart ?? true;
     this.policy = options.policy ?? null;
     this.vfs = resolveVmVfs(options.vfs);
+    const fuseConfig = resolveFuseConfig(options.vfs);
+    this.fuseMount = fuseConfig.fuseMount;
+    this.fuseBinds = fuseConfig.fuseBinds;
 
     if (options.url) {
       this.url = options.url;
@@ -449,6 +462,7 @@ export class VM {
 
   private resetConnectionState() {
     this.state = "unknown";
+    this.bootSent = false;
     this.initStatusPromise();
   }
 
@@ -465,16 +479,28 @@ export class VM {
     }
   }
 
+  private ensureBoot() {
+    if (this.bootSent) return;
+    this.bootSent = true;
+    this.state = "unknown";
+    this.initStatusPromise();
+    this.sendJson({
+      type: "boot",
+      fuseMount: this.fuseMount,
+      fuseBinds: this.fuseBinds,
+    });
+  }
+
   private async ensureRunning() {
     const state = await this.waitForStatus();
-    if (state === "running") return;
-
-    if (state === "stopped") {
-      if (!this.autoStart) {
-        throw new Error("sandbox is stopped");
-      }
-      this.sendJson({ type: "lifecycle", action: "restart" });
+    if (state === "stopped" && !this.autoStart) {
+      throw new Error("sandbox is stopped");
     }
+
+    this.ensureBoot();
+
+    const nextState = await this.waitForStatus();
+    if (nextState === "running") return;
 
     await this.waitForState("running");
   }
@@ -683,16 +709,35 @@ function normalizeCommand(command: ExecInput, options: ExecOptions): {
 
 function resolveVmVfs(options?: VmVfsOptions | null) {
   if (options === null) return null;
-  if (!options) {
-    return new SandboxVfsProvider(new MemoryProvider());
+  const hooks = options?.hooks ?? {};
+  const mounts = options?.mounts ?? {};
+  const mountKeys = Object.keys(mounts);
+
+  if (mountKeys.length === 0) {
+    return wrapProvider(new MemoryProvider(), hooks);
   }
-  const provider = options.provider ?? new MemoryProvider();
-  return wrapProvider(provider, options.hooks ?? {});
+
+  const normalized = normalizeMountMap(mounts);
+  let provider: VirtualProvider;
+  if (normalized.size === 1 && normalized.has("/")) {
+    provider = normalized.get("/")!;
+  } else {
+    provider = new MountRouterProvider(normalized);
+  }
+
+  return wrapProvider(provider, hooks);
 }
 
 function wrapProvider(provider: VirtualProvider, hooks: VfsHooks) {
   if (provider instanceof SandboxVfsProvider) return provider;
   return new SandboxVfsProvider(provider, hooks);
+}
+
+function resolveFuseConfig(options?: VmVfsOptions | null) {
+  const fuseMount = normalizeMountPath(options?.fuseMount ?? "/data");
+  const mountPaths = listMountPaths(options?.mounts);
+  const fuseBinds = mountPaths.filter((mountPath) => mountPath !== "/");
+  return { fuseMount, fuseBinds };
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<Buffer> {
