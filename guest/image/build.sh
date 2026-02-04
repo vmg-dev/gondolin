@@ -22,15 +22,22 @@ fi
 
 OUT_DIR=${OUT_DIR:-"${IMAGE_DIR}/out"}
 ROOTFS_DIR="${OUT_DIR}/rootfs"
-INITRAMFS="${OUT_DIR}/initramfs.cpio.gz"
+INITRAMFS_DIR="${OUT_DIR}/initramfs-root"
+ROOTFS_IMAGE="${OUT_DIR}/rootfs.ext4"
+INITRAMFS="${OUT_DIR}/initramfs.cpio.lz4"
 CACHE_DIR="${IMAGE_DIR}/.cache"
+
+ROOTFS_INIT=${ROOTFS_INIT:-"${IMAGE_DIR}/init"}
+INITRAMFS_INIT=${INITRAMFS_INIT:-"${IMAGE_DIR}/initramfs-init"}
+ROOTFS_LABEL=${ROOTFS_LABEL:-"gondolin-root"}
 
 SANDBOXD_BIN=${SANDBOXD_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxd"}
 SANDBOXFS_BIN=${SANDBOXFS_BIN:-"${GUEST_DIR}/zig-out/bin/sandboxfs"}
 
 ALPINE_TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${ARCH}.tar.gz"
 ALPINE_URL=${ALPINE_URL:-"https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/${ARCH}/${ALPINE_TARBALL}"}
-EXTRA_PACKAGES=${EXTRA_PACKAGES:-linux-virt rng-tools bash ca-certificates curl nodejs npm uv python3}
+ROOTFS_PACKAGES=${ROOTFS_PACKAGES:-${EXTRA_PACKAGES:-linux-virt rng-tools bash ca-certificates curl nodejs npm uv python3}}
+INITRAMFS_PACKAGES=${INITRAMFS_PACKAGES:-}
 
 require_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -42,8 +49,33 @@ require_cmd() {
 require_cmd tar
 require_cmd cpio
 require_cmd gzip
+require_cmd lz4
 require_cmd curl
 require_cmd python3
+
+if command -v mke2fs >/dev/null 2>&1; then
+    MKFS_EXT4="mke2fs"
+elif command -v mkfs.ext4 >/dev/null 2>&1; then
+    MKFS_EXT4="mkfs.ext4"
+elif [[ "$(uname -s)" == "Darwin" ]]; then
+    for candidate in \
+        /opt/homebrew/opt/e2fsprogs/sbin/mke2fs \
+        /opt/homebrew/opt/e2fsprogs/bin/mke2fs \
+        /opt/homebrew/opt/e2fsprogs/sbin/mkfs.ext4 \
+        /opt/homebrew/opt/e2fsprogs/bin/mkfs.ext4; do
+        if [[ -x "${candidate}" ]]; then
+            MKFS_EXT4="${candidate}"
+            break
+        fi
+    done
+fi
+
+if [[ -z "${MKFS_EXT4:-}" ]]; then
+    echo "missing required command: mke2fs (install e2fsprogs)" >&2
+    echo "On macOS: brew install e2fsprogs" >&2
+    echo "Then add to PATH: export PATH=\"/opt/homebrew/opt/e2fsprogs/sbin:/opt/homebrew/opt/e2fsprogs/bin:\$PATH\"" >&2
+    exit 1
+fi
 
 mkdir -p "${CACHE_DIR}" "${OUT_DIR}"
 
@@ -57,13 +89,14 @@ if [[ ! -f "${CACHE_DIR}/${ALPINE_TARBALL}" ]]; then
     curl -L "${ALPINE_URL}" -o "${CACHE_DIR}/${ALPINE_TARBALL}"
 fi
 
-rm -rf "${ROOTFS_DIR}"
-mkdir -p "${ROOTFS_DIR}"
+install_packages() {
+    local target_dir="$1"
+    local packages="$2"
+    if [[ -z "${packages}" ]]; then
+        return 0
+    fi
 
-tar -xzf "${CACHE_DIR}/${ALPINE_TARBALL}" -C "${ROOTFS_DIR}"
-
-if [[ -n "${EXTRA_PACKAGES}" ]]; then
-    ROOTFS_DIR="${ROOTFS_DIR}" CACHE_DIR="${CACHE_DIR}" ARCH="${ARCH}" EXTRA_PACKAGES="${EXTRA_PACKAGES}" python3 - <<'PY'
+    ROOTFS_DIR="${target_dir}" CACHE_DIR="${CACHE_DIR}" ARCH="${ARCH}" EXTRA_PACKAGES="${packages}" python3 - <<'PY'
 import os
 import re
 import sys
@@ -177,11 +210,21 @@ for pkg_name in needed:
     with tarfile.open(apk_path, "r:gz") as tar:
         tar.extractall(rootfs_dir, filter="fully_trusted")
 PY
-fi
+}
+
+rm -rf "${ROOTFS_DIR}" "${INITRAMFS_DIR}"
+mkdir -p "${ROOTFS_DIR}" "${INITRAMFS_DIR}"
+
+tar -xzf "${CACHE_DIR}/${ALPINE_TARBALL}" -C "${ROOTFS_DIR}"
+tar -xzf "${CACHE_DIR}/${ALPINE_TARBALL}" -C "${INITRAMFS_DIR}"
+
+install_packages "${ROOTFS_DIR}" "${ROOTFS_PACKAGES}"
+install_packages "${INITRAMFS_DIR}" "${INITRAMFS_PACKAGES}"
 
 install -m 0755 "${SANDBOXD_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxd"
 install -m 0755 "${SANDBOXFS_BIN}" "${ROOTFS_DIR}/usr/bin/sandboxfs"
-install -m 0755 "${IMAGE_DIR}/init" "${ROOTFS_DIR}/init"
+install -m 0755 "${ROOTFS_INIT}" "${ROOTFS_DIR}/init"
+install -m 0755 "${INITRAMFS_INIT}" "${INITRAMFS_DIR}/init"
 
 if [[ -x "${ROOTFS_DIR}/usr/bin/python3" && ! -e "${ROOTFS_DIR}/usr/bin/python" ]]; then
     ln -s python3 "${ROOTFS_DIR}/usr/bin/python"
@@ -197,10 +240,100 @@ if [[ -n "${MITM_CA_CERT:-}" && -f "${MITM_CA_CERT}" ]]; then
 fi
 
 mkdir -p "${ROOTFS_DIR}/proc" "${ROOTFS_DIR}/sys" "${ROOTFS_DIR}/dev" "${ROOTFS_DIR}/run"
+mkdir -p "${INITRAMFS_DIR}/proc" "${INITRAMFS_DIR}/sys" "${INITRAMFS_DIR}/dev" "${INITRAMFS_DIR}/run"
+
+copy_initramfs_modules() {
+    local modules_dir="$1"
+    local dest_dir="$2"
+    if [[ ! -d "${modules_dir}" ]]; then
+        echo "missing modules dir ${modules_dir}" >&2
+        return 1
+    fi
+
+    MODULES_DIR="${modules_dir}" DEST_DIR="${dest_dir}" python3 - <<'PY'
+import os
+import shutil
+
+modules_dir = os.environ["MODULES_DIR"]
+dest_dir = os.environ["DEST_DIR"]
+required = [
+    "kernel/drivers/block/virtio_blk.ko.gz",
+    "kernel/fs/ext4/ext4.ko.gz",
+]
+
+deps = {}
+modules_dep = os.path.join(modules_dir, "modules.dep")
+with open(modules_dep, "r", encoding="utf-8") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line:
+            continue
+        module, rest = line.split(":", 1)
+        deps[module] = [entry for entry in rest.split() if entry]
+
+stack = list(required)
+seen = set()
+while stack:
+    mod = stack.pop()
+    if mod in seen:
+        continue
+    seen.add(mod)
+    for dep in deps.get(mod, []):
+        stack.append(dep)
+
+for entry in sorted(seen):
+    src = os.path.join(modules_dir, entry)
+    dest = os.path.join(dest_dir, entry)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.copy2(src, dest)
+
+os.makedirs(dest_dir, exist_ok=True)
+for entry in os.listdir(modules_dir):
+    if not entry.startswith("modules."):
+        continue
+    src = os.path.join(modules_dir, entry)
+    if os.path.isfile(src):
+        shutil.copy2(src, os.path.join(dest_dir, entry))
+PY
+}
+
+if [[ -d "${ROOTFS_DIR}/lib/modules" ]]; then
+    KERNEL_VERSION=$(ls -1 "${ROOTFS_DIR}/lib/modules" | head -n 1)
+    MODULES_DIR="${ROOTFS_DIR}/lib/modules/${KERNEL_VERSION}"
+    INITRAMFS_MODULES_DIR="${INITRAMFS_DIR}/lib/modules/${KERNEL_VERSION}"
+    copy_initramfs_modules "${MODULES_DIR}" "${INITRAMFS_MODULES_DIR}"
+fi
+
+create_rootfs_image() {
+    local image="$1"
+    local source_dir="$2"
+
+    if [[ -n "${ROOTFS_IMAGE_SIZE_MB:-}" ]]; then
+        size_mb="${ROOTFS_IMAGE_SIZE_MB}"
+    else
+        local size_kb
+        size_kb=$(du -sk "${source_dir}" | awk '{print $1}')
+        size_kb=$((size_kb + size_kb / 5 + 65536))
+        size_mb=$(((size_kb + 1023) / 1024))
+    fi
+
+    "${MKFS_EXT4}" \
+        -t ext4 \
+        -d "${source_dir}" \
+        -L "${ROOTFS_LABEL}" \
+        -m 0 \
+        -O ^has_journal \
+        -E lazy_itable_init=0,lazy_journal_init=0 \
+        -b 4096 \
+        -F "${image}" "${size_mb}M"
+}
+
+create_rootfs_image "${ROOTFS_IMAGE}" "${ROOTFS_DIR}"
 
 (
-    cd "${ROOTFS_DIR}"
-    find . -print0 | cpio --null -ov --format=newc | gzip -9 > "${INITRAMFS}"
+    cd "${INITRAMFS_DIR}"
+    find . -print0 | cpio --null -ov --format=newc | lz4 -l -c > "${INITRAMFS}"
 )
 
+echo "rootfs image written to ${ROOTFS_IMAGE}"
 echo "initramfs written to ${INITRAMFS}"

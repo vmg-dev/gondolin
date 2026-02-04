@@ -35,6 +35,9 @@ function parseArgs(argv: string[]): SandboxWsServerOptions {
       case "--initrd":
         args.initrdPath = argv[++i];
         break;
+      case "--rootfs":
+        args.rootfsPath = argv[++i];
+        break;
       case "--memory":
         args.memory = argv[++i];
         break;
@@ -99,6 +102,7 @@ function usage() {
   console.log(`  --qemu PATH          QEMU binary (default ${defaults.qemuPath})`);
   console.log("  --kernel PATH        Kernel path");
   console.log("  --initrd PATH        Initrd path");
+  console.log("  --rootfs PATH        Root filesystem image path");
   console.log(`  --memory SIZE        Memory size (default ${defaults.memory})`);
   console.log(`  --cpus N             vCPU count (default ${defaults.cpus})`);
   console.log("  --virtio-sock PATH   Virtio serial socket path");

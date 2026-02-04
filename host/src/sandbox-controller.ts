@@ -6,6 +6,7 @@ export type SandboxConfig = {
   qemuPath: string;
   kernelPath: string;
   initrdPath: string;
+  rootfsPath?: string;
   memory: string;
   cpus: number;
   virtioSocketPath: string;
@@ -138,6 +139,14 @@ function buildQemuArgs(config: SandboxConfig) {
     config.append,
     "-nographic",
   ];
+
+  if (config.rootfsPath) {
+    args.push(
+      "-drive",
+      `file=${config.rootfsPath},format=raw,if=none,id=drive0,snapshot=on`
+    );
+    args.push("-device", "virtio-blk-pci,drive=drive0");
+  }
 
   const targetArch = detectTargetArch(config);
   const machineType = config.machineType ?? selectMachineType(targetArch);

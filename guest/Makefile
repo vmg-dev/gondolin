@@ -11,8 +11,10 @@ ZIG_BUILD_DEPS := $(ZIG_SOURCES) build.zig.zon
 
 IMAGE_SCRIPT ?= ./image/build.sh
 IMAGE_OUT ?= ./image/out
-IMAGE_INITRAMFS ?= $(IMAGE_OUT)/initramfs.cpio.gz
-IMAGE_INIT ?= ./image/init
+IMAGE_INITRAMFS ?= $(IMAGE_OUT)/initramfs.cpio.lz4
+IMAGE_ROOTFS ?= $(IMAGE_OUT)/rootfs.ext4
+IMAGE_ROOTFS_INIT ?= ./image/init
+IMAGE_INITRAMFS_INIT ?= ./image/initramfs-init
 SANDBOXD_BIN ?= $(CURDIR)/zig-out/bin/sandboxd
 SANDBOXFS_BIN ?= $(CURDIR)/zig-out/bin/sandboxfs
 
@@ -56,7 +58,7 @@ QEMU_MEMORY ?= 256M
 ifeq ($(ALPINE_ARCH),aarch64)
 QEMU_MEMORY ?= 512M
 endif
-QEMU_SMP ?= 1
+QEMU_SMP ?= 2
 QEMU_SERIAL ?= stdio
 QEMU_WAIT ?= on
 VIRTIO_SOCK ?= $(IMAGE_OUT)/virtio.sock
@@ -76,14 +78,14 @@ run: build-bins
 $(SANDBOXD_BIN): $(ZIG_BUILD_DEPS)
 	$(ZIG) build -Doptimize=$(OPTIMIZE)
 
-$(IMAGE_INITRAMFS): $(SANDBOXD_BIN) $(SANDBOXFS_BIN) $(IMAGE_SCRIPT) $(IMAGE_INIT) $(MITM_CA_CERT_PATH)
-	ARCH=$(ALPINE_ARCH) ALPINE_VERSION=$(ALPINE_VERSION) ALPINE_BRANCH=$(ALPINE_BRANCH) MITM_CA_CERT=$(MITM_CA_CERT) $(IMAGE_SCRIPT)
+$(IMAGE_INITRAMFS) $(IMAGE_ROOTFS): $(SANDBOXD_BIN) $(SANDBOXFS_BIN) $(IMAGE_SCRIPT) $(IMAGE_ROOTFS_INIT) $(IMAGE_INITRAMFS_INIT) $(MITM_CA_CERT_PATH)
+	ARCH=$(ALPINE_ARCH) ALPINE_VERSION=$(ALPINE_VERSION) ALPINE_BRANCH=$(ALPINE_BRANCH) ROOTFS_INIT=$(IMAGE_ROOTFS_INIT) INITRAMFS_INIT=$(IMAGE_INITRAMFS_INIT) MITM_CA_CERT=$(MITM_CA_CERT) $(IMAGE_SCRIPT)
 
 image:
 	@$(RUN_PARALLEL) -j 1 \
 		"guest:image" "$(MAKE) image-inner"
 
-image-inner: $(IMAGE_INITRAMFS)
+image-inner: $(IMAGE_INITRAMFS) $(IMAGE_ROOTFS)
 
 kernel:
 	@$(RUN_PARALLEL) -j 1 \
@@ -122,7 +124,9 @@ qemu: image kernel
 		-nodefaults -no-reboot -m $(QEMU_MEMORY) -smp $(QEMU_SMP) \
 		-kernel $(KERNEL) \
 		-initrd $(IMAGE_INITRAMFS) \
-		-append "console=ttyS0" \
+		-drive file=$(IMAGE_ROOTFS),format=raw,if=none,id=drive0,snapshot=on \
+		-device virtio-blk-pci,drive=drive0 \
+		-append "console=ttyS0 initramfs_async=1" \
 		-nographic \
 		-serial $(QEMU_SERIAL) \
 		-object rng-random,filename=/dev/urandom,id=rng0 \

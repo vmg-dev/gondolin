@@ -45,6 +45,7 @@ export type SandboxWsServerOptions = {
   qemuPath?: string;
   kernelPath?: string;
   initrdPath?: string;
+  rootfsPath?: string;
   memory?: string;
   cpus?: number;
   virtioSocketPath?: string;
@@ -85,6 +86,7 @@ type ResolvedServerOptions = {
   qemuPath: string;
   kernelPath: string;
   initrdPath: string;
+  rootfsPath: string;
   memory: string;
   cpus: number;
   virtioSocketPath: string;
@@ -113,7 +115,8 @@ export function resolveSandboxWsServerOptions(
 ): ResolvedServerOptions {
   const repoRoot = path.resolve(__dirname, "../..");
   const defaultKernel = path.resolve(repoRoot, "guest/image/out/vmlinuz-virt");
-  const defaultInitrd = path.resolve(repoRoot, "guest/image/out/initramfs.cpio.gz");
+  const defaultInitrd = path.resolve(repoRoot, "guest/image/out/initramfs.cpio.lz4");
+  const defaultRootfs = path.resolve(repoRoot, "guest/image/out/rootfs.ext4");
   // we are running into length limits on macos on the default temp dir
   const tmpDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
   const defaultVirtio = path.resolve(
@@ -141,8 +144,9 @@ export function resolveSandboxWsServerOptions(
     qemuPath: options.qemuPath ?? defaultQemu,
     kernelPath: options.kernelPath ?? defaultKernel,
     initrdPath: options.initrdPath ?? defaultInitrd,
+    rootfsPath: options.rootfsPath ?? defaultRootfs,
     memory: options.memory ?? defaultMemory,
-    cpus: options.cpus ?? 1,
+    cpus: options.cpus ?? 2,
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
     virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
@@ -466,12 +470,13 @@ export class SandboxWsServer extends EventEmitter {
 
     const hostArch = detectHostArch();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
-    this.baseAppend = this.options.append ?? `console=${consoleDevice}`;
+    this.baseAppend = this.options.append ?? `console=${consoleDevice} initramfs_async=1`;
 
     const sandboxConfig: SandboxConfig = {
       qemuPath: this.options.qemuPath,
       kernelPath: this.options.kernelPath,
       initrdPath: this.options.initrdPath,
+      rootfsPath: this.options.rootfsPath,
       memory: this.options.memory,
       cpus: this.options.cpus,
       virtioSocketPath: this.options.virtioSocketPath,
