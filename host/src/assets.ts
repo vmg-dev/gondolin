@@ -36,13 +36,14 @@ function getAssetDir(): string {
 
   // Check for local development (repo checkout)
   // Handle both source (src/) and compiled (dist/src/) paths
-  const possibleRoots = [
-    path.resolve(__dirname, "..", ".."),      // from src/: host/ -> ../guest
-    path.resolve(__dirname, "..", "..", ".."), // from dist/src/: host/ -> ../guest
+  // We need to find the repo root where guest/ lives
+  const possibleRepoRoots = [
+    path.resolve(__dirname, "..", ".."),       // from src/: -> host/ -> gondolin/
+    path.resolve(__dirname, "..", "..", ".."), // from dist/src/: -> dist/ -> host/ -> gondolin/
   ];
   
-  for (const root of possibleRoots) {
-    const devPath = path.join(root, "..", "guest", "image", "out");
+  for (const repoRoot of possibleRepoRoots) {
+    const devPath = path.join(repoRoot, "guest", "image", "out");
     if (fs.existsSync(path.join(devPath, "vmlinuz-virt"))) {
       return devPath;
     }

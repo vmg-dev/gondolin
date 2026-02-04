@@ -117,13 +117,14 @@ export type ResolvedServerOptions = {
  */
 function getLocalGuestAssets(): Partial<GuestAssets> {
   // Handle both source (src/) and compiled (dist/src/) paths
-  const possibleRoots = [
-    path.resolve(__dirname, "../.."),     // from src/: host/
-    path.resolve(__dirname, "../../.."),  // from dist/src/: host/
+  // We need to find the repo root where guest/ lives
+  const possibleRepoRoots = [
+    path.resolve(__dirname, "../.."),      // from src/: -> host/ -> gondolin/
+    path.resolve(__dirname, "../../.."),   // from dist/src/: -> dist/ -> host/ -> gondolin/
   ];
   
-  for (const root of possibleRoots) {
-    const devPath = path.join(root, "..", "guest", "image", "out");
+  for (const repoRoot of possibleRepoRoots) {
+    const devPath = path.join(repoRoot, "guest", "image", "out");
     const kernelPath = path.join(devPath, "vmlinuz-virt");
     const initrdPath = path.join(devPath, "initramfs.cpio.lz4");
     const rootfsPath = path.join(devPath, "rootfs.ext4");
