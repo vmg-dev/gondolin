@@ -304,6 +304,8 @@ if [[ -d "${ROOTFS_DIR}/lib/modules" ]]; then
     copy_initramfs_modules "${MODULES_DIR}" "${INITRAMFS_MODULES_DIR}"
 fi
 
+rm -rf "${ROOTFS_DIR}/boot"
+
 create_rootfs_image() {
     local image="$1"
     local source_dir="$2"
