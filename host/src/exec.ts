@@ -120,6 +120,9 @@ export type ExecSession = {
   signal?: AbortSignal;
   signalListener?: () => void;
   iterating: boolean;
+  requestReady: boolean;
+  pendingStdin: Array<{ type: "data"; data: Buffer | string } | { type: "eof" }>;
+  pendingResize: { rows: number; cols: number } | null;
 };
 
 /**
@@ -441,6 +444,9 @@ export function createExecSession(
     encoding: options.encoding ?? DEFAULT_ENCODING,
     signal: options.signal,
     iterating: false,
+    requestReady: false,
+    pendingStdin: [],
+    pendingResize: null,
   };
 
   // Output buffering is handled in VM.handleMessage to avoid

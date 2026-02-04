@@ -373,6 +373,7 @@ export class VM {
       };
 
       this.sendJson(message);
+      this.markSessionReady(session);
 
       // Pipe stdin if provided (and not just `true`)
       if (session.stdinEnabled && stdinSetting !== true && stdinSetting !== undefined) {
@@ -441,7 +442,50 @@ export class VM {
     }
   }
 
+  private markSessionReady(session: ExecSession) {
+    if (session.requestReady) return;
+    session.requestReady = true;
+
+    if (session.pendingResize) {
+      const { rows, cols } = session.pendingResize;
+      session.pendingResize = null;
+      this.sendPtyResizeNow(session.id, rows, cols);
+    }
+
+    if (session.pendingStdin.length > 0) {
+      const pending = session.pendingStdin;
+      session.pendingStdin = [];
+      for (const item of pending) {
+        if (item.type === "data") {
+          this.sendStdinDataNow(session.id, item.data);
+        } else {
+          this.sendStdinEofNow(session.id);
+        }
+      }
+    }
+  }
+
   private sendStdinData(id: number, data: Buffer | string) {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    if (!session.requestReady) {
+      session.pendingStdin.push({ type: "data", data });
+      return;
+    }
+    this.sendStdinDataNow(id, data);
+  }
+
+  private sendStdinEof(id: number) {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    if (!session.requestReady) {
+      session.pendingStdin.push({ type: "eof" });
+      return;
+    }
+    this.sendStdinEofNow(id);
+  }
+
+  private sendStdinDataNow(id: number, data: Buffer | string) {
     const payload = typeof data === "string" ? Buffer.from(data) : Buffer.from(data);
     for (let offset = 0; offset < payload.length; offset += DEFAULT_STDIN_CHUNK) {
       const slice = payload.subarray(offset, offset + DEFAULT_STDIN_CHUNK);
@@ -453,7 +497,7 @@ export class VM {
     }
   }
 
-  private sendStdinEof(id: number) {
+  private sendStdinEofNow(id: number) {
     this.sendJson({
       type: "stdin",
       id,
@@ -463,14 +507,24 @@ export class VM {
 
   private sendPtyResize(id: number, rows: number, cols: number) {
     if (!Number.isFinite(rows) || !Number.isFinite(cols)) return;
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const session = this.sessions.get(id);
+    if (!session) return;
     const safeRows = Math.max(1, Math.trunc(rows));
     const safeCols = Math.max(1, Math.trunc(cols));
+    if (!session.requestReady) {
+      session.pendingResize = { rows: safeRows, cols: safeCols };
+      return;
+    }
+    this.sendPtyResizeNow(id, safeRows, safeCols);
+  }
+
+  private sendPtyResizeNow(id: number, rows: number, cols: number) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.sendJson({
       type: "pty_resize",
       id,
-      rows: safeRows,
-      cols: safeCols,
+      rows,
+      cols,
     });
   }
 
@@ -622,6 +676,7 @@ export class VM {
 
     try {
       this.sendJson(message);
+      this.markSessionReady(session);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       this.sessions.delete(id);
