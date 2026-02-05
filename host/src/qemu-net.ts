@@ -1530,3 +1530,14 @@ function applyRedirectRequest(
     body,
   };
 }
+
+// Expose internal helpers for unit tests. Not part of the public API.
+export const __test = {
+  dns,
+  createLookupGuard,
+  normalizeLookupEntries,
+  normalizeLookupOptions,
+  normalizeLookupFailure,
+  getRedirectUrl,
+  applyRedirectRequest,
+};
