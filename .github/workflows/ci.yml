@@ -150,11 +150,17 @@ jobs:
         run: pnpm run build
 
       - name: Run tests
-        timeout-minutes: 10
-        run: make test
+        # Run guest + host tests sequentially to avoid running multiple QEMU instances
+        # concurrently (which can hang/time out on some CI runners).
+        timeout-minutes: 20
+        run: |
+          make -C guest test
+          make -C host test
         env:
           GONDOLIN_GUEST_DIR: ${{ github.workspace }}/guest/image/out
           WS_TIMEOUT: "120000"
+          # Enable VM/QEMU logs to help diagnose boot/hang issues in CI.
+          GONDOLIN_DEBUG: "net"
 
   # Optional: Publish preview package for PRs (uses trusted publishing)
   # Uncomment to enable publishing test versions from PRs
