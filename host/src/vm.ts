@@ -71,6 +71,7 @@ export type VMOptions = {
   autoStart?: boolean;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
+  maxHttpBodyBytes?: number;
   vfs?: VmVfsOptions | null;
   env?: EnvInput;
   /** Maximum memory for the VM (e.g., "1G", "512M"). Default: "1G" */
@@ -153,6 +154,9 @@ export class VM {
     }
     if (options.httpHooks && serverOptions.httpHooks === undefined) {
       serverOptions.httpHooks = options.httpHooks;
+    }
+    if (options.maxHttpBodyBytes !== undefined && serverOptions.maxHttpBodyBytes === undefined) {
+      serverOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
     }
     if (serverOptions.host === undefined) serverOptions.host = "127.0.0.1";
     if (serverOptions.port === undefined) serverOptions.port = 0;
@@ -242,6 +246,9 @@ export class VM {
     }
     if (options.httpHooks && serverOptions.httpHooks === undefined) {
       serverOptions.httpHooks = options.httpHooks;
+    }
+    if (options.maxHttpBodyBytes !== undefined && serverOptions.maxHttpBodyBytes === undefined) {
+      serverOptions.maxHttpBodyBytes = options.maxHttpBodyBytes;
     }
     if (this.vfs && serverOptions.vfsProvider === undefined) {
       serverOptions.vfsProvider = this.vfs;

@@ -16,6 +16,7 @@ import { lookup } from "dns/promises";
 import { Agent, fetch as undiciFetch } from "undici";
 
 const MAX_HTTP_REDIRECTS = 10;
+export const DEFAULT_MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024;
 
 type FetchResponse = Awaited<ReturnType<typeof undiciFetch>>;
 
@@ -159,6 +160,7 @@ export type QemuNetworkOptions = {
   httpHooks?: HttpHooks;
   mitmCertDir?: string;
   policy?: SandboxPolicy;
+  maxHttpBodyBytes?: number;
 };
 
 type CaCert = {
@@ -179,11 +181,13 @@ export class QemuNetworkBackend extends EventEmitter {
   private tlsContexts = new Map<string, tls.SecureContext>();
   private tlsContextPromises = new Map<string, Promise<tls.SecureContext>>();
   private policy: SandboxPolicy | null = null;
+  private readonly maxHttpBodyBytes: number;
 
   constructor(private readonly options: QemuNetworkOptions) {
     super();
     this.policy = options.policy ?? null;
     this.mitmDir = resolveMitmCertDir(options.mitmCertDir);
+    this.maxHttpBodyBytes = options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES;
   }
 
   start() {
@@ -608,7 +612,26 @@ export class QemuNetworkBackend extends EventEmitter {
     httpSession.buffer = Buffer.concat([httpSession.buffer, data]);
     if (httpSession.processing) return;
 
-    const parsed = this.parseHttpRequest(httpSession.buffer);
+    let parsed: { request: HttpRequestData; remaining: Buffer } | null = null;
+    try {
+      parsed = this.parseHttpRequest(httpSession.buffer);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      if (error instanceof HttpRequestBlockedError) {
+        if (this.options.debug) {
+          this.emit("log", `[net] http blocked ${error.message}`);
+        }
+        this.respondWithError(options.write, error.status, error.statusText);
+      } else {
+        this.emit("error", error);
+        this.respondWithError(options.write, 400, "Bad Request");
+      }
+      httpSession.closed = true;
+      options.finish();
+      this.flush();
+      return;
+    }
+
     if (!parsed) return;
 
     httpSession.processing = true;
@@ -668,11 +691,12 @@ export class QemuNetworkBackend extends EventEmitter {
 
     const bodyOffset = headerEnd + 4;
     const bodyBuffer = buffer.subarray(bodyOffset);
+    const maxBodyBytes = this.maxHttpBodyBytes;
 
     // XXX: cap request body size to avoid unbounded buffering (Content-Length/chunked).
     const transferEncoding = headers["transfer-encoding"]?.toLowerCase();
     if (transferEncoding === "chunked") {
-      const chunked = this.decodeChunkedBody(bodyBuffer);
+      const chunked = this.decodeChunkedBody(bodyBuffer, maxBodyBytes);
       if (!chunked.complete) return null;
       return {
         request: {
@@ -689,6 +713,14 @@ export class QemuNetworkBackend extends EventEmitter {
     const contentLength = headers["content-length"] ? Number(headers["content-length"]) : 0;
     if (!Number.isFinite(contentLength) || contentLength < 0) return null;
 
+    if (Number.isFinite(maxBodyBytes) && contentLength > maxBodyBytes) {
+      throw new HttpRequestBlockedError(
+        `request body exceeds ${maxBodyBytes} bytes`,
+        413,
+        "Payload Too Large"
+      );
+    }
+
     if (bodyBuffer.length < contentLength) return null;
 
     return {
@@ -703,10 +735,14 @@ export class QemuNetworkBackend extends EventEmitter {
     };
   }
 
-  private decodeChunkedBody(buffer: Buffer): { complete: boolean; body: Buffer; bytesConsumed: number } {
+  private decodeChunkedBody(
+    buffer: Buffer,
+    maxBodyBytes: number
+  ): { complete: boolean; body: Buffer; bytesConsumed: number } {
     let offset = 0;
+    let totalBytes = 0;
     const chunks: Buffer[] = [];
-    // XXX: enforce a max chunked body size while accumulating chunks.
+    const enforceLimit = Number.isFinite(maxBodyBytes) && maxBodyBytes >= 0;
 
     while (true) {
       const lineEnd = buffer.indexOf("\r\n", offset);
@@ -721,6 +757,14 @@ export class QemuNetworkBackend extends EventEmitter {
       if (buffer.length < chunkEnd + 2) return { complete: false, body: Buffer.alloc(0), bytesConsumed: 0 };
 
       if (size > 0) {
+        if (enforceLimit && totalBytes + size > maxBodyBytes) {
+          throw new HttpRequestBlockedError(
+            `request body exceeds ${maxBodyBytes} bytes`,
+            413,
+            "Payload Too Large"
+          );
+        }
+        totalBytes += size;
         chunks.push(buffer.subarray(chunkStart, chunkEnd));
       }
 

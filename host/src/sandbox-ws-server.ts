@@ -28,7 +28,7 @@ import {
   ServerMessage,
 } from "./ws-protocol";
 import { SandboxController, SandboxConfig, SandboxState } from "./sandbox-controller";
-import { QemuNetworkBackend } from "./qemu-net";
+import { QemuNetworkBackend, DEFAULT_MAX_HTTP_BODY_BYTES } from "./qemu-net";
 import type { HttpFetch, HttpHooks } from "./qemu-net";
 import type { SandboxPolicy } from "./policy";
 import { FsRpcService, SandboxVfsProvider, type VirtualProvider } from "./vfs";
@@ -67,6 +67,7 @@ export type SandboxWsServerOptions = {
   policy?: SandboxPolicy;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
+  maxHttpBodyBytes?: number;
   mitmCertDir?: string;
   vfsProvider?: VirtualProvider;
 };
@@ -106,6 +107,7 @@ export type ResolvedServerOptions = {
   append?: string;
   maxJsonBytes: number;
   maxStdinBytes: number;
+  maxHttpBodyBytes: number;
   policy: SandboxPolicy | null;
   fetch?: HttpFetch;
   httpHooks?: HttpHooks;
@@ -223,6 +225,7 @@ export function resolveSandboxWsServerOptions(
     append: options.append,
     maxJsonBytes: options.maxJsonBytes ?? DEFAULT_MAX_JSON_BYTES,
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
+    maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     policy: options.policy ?? null,
     fetch: options.fetch,
     httpHooks: options.httpHooks,
@@ -597,8 +600,13 @@ export class SandboxWsServer extends EventEmitter {
     });
     // Detect if we received pre-resolved options (from static create())
     // by checking for a field that's required in resolved but computed in unresolved
-    const isResolved = "maxJsonBytes" in options && "maxStdinBytes" in options &&
-      typeof options.maxJsonBytes === "number" && typeof options.maxStdinBytes === "number";
+    const isResolved =
+      "maxJsonBytes" in options &&
+      "maxStdinBytes" in options &&
+      "maxHttpBodyBytes" in options &&
+      typeof options.maxJsonBytes === "number" &&
+      typeof options.maxStdinBytes === "number" &&
+      typeof options.maxHttpBodyBytes === "number";
     this.options = isResolved
       ? (options as ResolvedServerOptions)
       : resolveSandboxWsServerOptions(options as SandboxWsServerOptions);
@@ -651,6 +659,7 @@ export class SandboxWsServer extends EventEmitter {
           fetch: this.options.fetch,
           httpHooks: this.options.httpHooks,
           mitmCertDir: this.options.mitmCertDir,
+          maxHttpBodyBytes: this.options.maxHttpBodyBytes,
         })
       : null;
 

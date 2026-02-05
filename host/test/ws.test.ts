@@ -137,6 +137,149 @@ test("ws fetch hook blocks requests", { timeout: timeoutMs, skip: Boolean(url) }
   }
 });
 
+test("ws http body size limit blocks content-length", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+  const requests: Array<{ url: string; size: number }> = [];
+  const fetchStub: typeof fetch = async (input, init) => {
+    const urlString =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const body = init?.body;
+    const size = body
+      ? typeof body === "string"
+        ? Buffer.byteLength(body)
+        : body instanceof Uint8Array
+          ? body.length
+          : 0
+      : 0;
+    requests.push({ url: urlString, size });
+    return new Response("OK", { status: 200 });
+  };
+
+  const vm = new VM({
+    token: token ?? undefined,
+    fetch: fetchStub,
+    maxHttpBodyBytes: 128,
+  });
+
+  try {
+    const script = [
+      "import urllib.request, urllib.error",
+      "def post(size):",
+      "    data = b'x' * size",
+      "    req = urllib.request.Request('http://example.com/upload', data=data, method='POST')",
+      "    try:",
+      "        return urllib.request.urlopen(req, timeout=5).read().decode('utf-8', 'ignore')",
+      "    except urllib.error.HTTPError as e:",
+      "        return f'HTTP {e.code}'",
+      "    except Exception as e:",
+      "        return f'ERROR {type(e).__name__}'",
+      "print('SMALL')",
+      "print(post(16))",
+      "print('LARGE')",
+      "print(post(512))",
+    ].join("\n");
+
+    const result = await withTimeout(vm.exec(["python3", "-c", script]), timeoutMs);
+
+    const output = result.stdout.trim().split("\n");
+    const stderr = result.stderr;
+
+    assert.equal(
+      result.exitCode,
+      0,
+      stderr.trim() ? `unexpected exit code: ${result.exitCode}\n${stderr.trim()}` : undefined
+    );
+
+    const smallIndex = output.indexOf("SMALL");
+    const largeIndex = output.indexOf("LARGE");
+
+    assert.notEqual(smallIndex, -1, `missing SMALL output: ${output.join("\n")}`);
+    assert.notEqual(largeIndex, -1, `missing LARGE output: ${output.join("\n")}`);
+    assert.equal(output[smallIndex + 1], "OK");
+    assert.equal(output[largeIndex + 1], "HTTP 413");
+  } finally {
+    await vm.stop();
+  }
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "http://example.com/upload");
+  assert.equal(requests[0].size, 16);
+});
+
+test("ws http body size limit blocks chunked requests", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
+  const requests: Array<{ url: string; size: number }> = [];
+  const fetchStub: typeof fetch = async (input, init) => {
+    const urlString =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const body = init?.body;
+    const size = body
+      ? typeof body === "string"
+        ? Buffer.byteLength(body)
+        : body instanceof Uint8Array
+          ? body.length
+          : 0
+      : 0;
+    requests.push({ url: urlString, size });
+    return new Response("OK", { status: 200 });
+  };
+
+  const vm = new VM({
+    token: token ?? undefined,
+    fetch: fetchStub,
+    maxHttpBodyBytes: 64,
+  });
+
+  try {
+    const script = [
+      "import http.client",
+      "def post_chunked(size):",
+      "    conn = http.client.HTTPConnection('example.com', timeout=5)",
+      "    body = b'y' * size",
+      "    conn.request('POST', '/chunked', body=body, headers={'Content-Type': 'application/octet-stream'}, encode_chunked=True)",
+      "    resp = conn.getresponse()",
+      "    resp.read()",
+      "    conn.close()",
+      "    return resp.status",
+      "print('SMALL')",
+      "print(post_chunked(8))",
+      "print('LARGE')",
+      "print(post_chunked(256))",
+    ].join("\n");
+
+    const result = await withTimeout(vm.exec(["python3", "-c", script]), timeoutMs);
+
+    const output = result.stdout.trim().split("\n");
+    const stderr = result.stderr;
+
+    assert.equal(
+      result.exitCode,
+      0,
+      stderr.trim() ? `unexpected exit code: ${result.exitCode}\n${stderr.trim()}` : undefined
+    );
+
+    const smallIndex = output.indexOf("SMALL");
+    const largeIndex = output.indexOf("LARGE");
+
+    assert.notEqual(smallIndex, -1, `missing SMALL output: ${output.join("\n")}`);
+    assert.notEqual(largeIndex, -1, `missing LARGE output: ${output.join("\n")}`);
+    assert.equal(output[smallIndex + 1], "200");
+    assert.equal(output[largeIndex + 1], "413");
+  } finally {
+    await vm.stop();
+  }
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "http://example.com/chunked");
+  assert.equal(requests[0].size, 8);
+});
+
 test("ws isAllowed blocks private ipv4", { timeout: timeoutMs, skip: Boolean(url) }, async () => {
   const isPrivateIPv4 = (ip: string) => {
     const parts = ip.split(".").map((part) => Number(part));
