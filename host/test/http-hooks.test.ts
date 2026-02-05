@@ -56,6 +56,92 @@ test("http hooks allowlist patterns", async () => {
   );
 });
 
+test("http hooks hostname matching handles empty patterns and multiple wildcards", async () => {
+  // Empty patterns should be ignored by normalization/uniquing.
+  const { httpHooks, allowedHosts } = createHttpHooks({
+    allowedHosts: ["", "   ", "a**b.com"],
+  });
+
+  assert.deepEqual(allowedHosts, ["a**b.com"]);
+
+  const isAllowed = httpHooks.isAllowed!;
+
+  assert.equal(
+    await isAllowed({
+      hostname: "axxxb.com",
+      ip: "8.8.8.8",
+      family: 4,
+      port: 443,
+      protocol: "https",
+    }),
+    true
+  );
+
+  assert.equal(
+    await isAllowed({
+      hostname: "ab.com",
+      ip: "8.8.8.8",
+      family: 4,
+      port: 443,
+      protocol: "https",
+    }),
+    true
+  );
+
+  assert.equal(
+    await isAllowed({
+      hostname: "acb.com",
+      ip: "8.8.8.8",
+      family: 4,
+      port: 443,
+      protocol: "https",
+    }),
+    true
+  );
+
+  assert.equal(
+    await isAllowed({
+      hostname: "nope.com",
+      ip: "8.8.8.8",
+      family: 4,
+      port: 443,
+      protocol: "https",
+    }),
+    false
+  );
+});
+
+test("http hooks allowlist '*' matches any hostname (but still blocks internal)", async () => {
+  const { httpHooks } = createHttpHooks({
+    allowedHosts: ["*"],
+  });
+
+  const isAllowed = httpHooks.isAllowed!;
+
+  assert.equal(
+    await isAllowed({
+      hostname: "anything.example",
+      ip: "8.8.8.8",
+      family: 4,
+      port: 443,
+      protocol: "https",
+    }),
+    true
+  );
+
+  // '*' does not bypass internal range blocking.
+  assert.equal(
+    await isAllowed({
+      hostname: "anything.example",
+      ip: "::1",
+      family: 6,
+      port: 443,
+      protocol: "https",
+    }),
+    false
+  );
+});
+
 test("http hooks block internal ranges by default", async () => {
   const { httpHooks } = createHttpHooks({
     allowedHosts: ["example.com"],
@@ -72,6 +158,90 @@ test("http hooks block internal ranges by default", async () => {
       protocol: "http",
     }),
     false
+  );
+});
+
+test("http hooks block internal IPv6 ranges (loopback, ULA, link-local)", async () => {
+  const { httpHooks } = createHttpHooks({
+    allowedHosts: ["example.com"],
+  });
+
+  const isAllowed = httpHooks.isAllowed!;
+
+  const cases = [
+    "::", // all zeros / unspecified
+    "::1", // loopback
+    "fc00::1", // ULA
+    "fd12:3456:789a::1", // ULA
+    "fe80::1", // link-local
+    "::ffff:127.0.0.1", // IPv4-mapped loopback
+    "::ffff:10.0.0.1", // IPv4-mapped private
+  ];
+
+  for (const ip of cases) {
+    assert.equal(
+      await isAllowed({
+        hostname: "example.com",
+        ip,
+        family: 6,
+        port: 443,
+        protocol: "https",
+      }),
+      false,
+      `expected ${ip} to be blocked`
+    );
+  }
+});
+
+test("http hooks allow non-private IPv6 (including IPv4-suffix forms)", async () => {
+  const { httpHooks } = createHttpHooks({
+    allowedHosts: ["example.com"],
+  });
+
+  const isAllowed = httpHooks.isAllowed!;
+
+  // IPv4-mapped *public* address
+  assert.equal(
+    await isAllowed({
+      hostname: "example.com",
+      ip: "::ffff:8.8.8.8",
+      family: 6,
+      port: 443,
+      protocol: "https",
+    }),
+    true
+  );
+
+  // IPv6 with embedded IPv4 suffix (not mapped)
+  assert.equal(
+    await isAllowed({
+      hostname: "example.com",
+      ip: "64:ff9b::8.8.8.8",
+      family: 6,
+      port: 443,
+      protocol: "https",
+    }),
+    true
+  );
+});
+
+test("http hooks ignore invalid IP strings for internal-range checks", async () => {
+  const { httpHooks } = createHttpHooks({
+    allowedHosts: ["example.com"],
+  });
+
+  const isAllowed = httpHooks.isAllowed!;
+
+  // net.isIP() returns 0 => treated as non-internal.
+  assert.equal(
+    await isAllowed({
+      hostname: "example.com",
+      ip: "zzzz::1",
+      family: 6,
+      port: 443,
+      protocol: "https",
+    }),
+    true
   );
 });
 
