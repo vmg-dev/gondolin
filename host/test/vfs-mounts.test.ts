@@ -82,3 +82,85 @@ test("MountRouterProvider exposes virtual root without base mount", async () => 
 
   await assert.rejects(() => router.open("/missing.txt", "r"), isENOENT);
 });
+
+test("MountRouterProvider resolves deep nested mounts and normalizes .. traversal", async () => {
+  const write = async (provider: MemoryProvider, p: string, contents: string) => {
+    const fh = await provider.open(p, "w+");
+    await fh.writeFile(contents);
+    await fh.close();
+  };
+
+  const root = new MemoryProvider();
+  const a = new MemoryProvider();
+  const b = new MemoryProvider();
+  const c = new MemoryProvider();
+
+  await write(root, "/root.txt", "root");
+  await write(a, "/id.txt", "A");
+  await write(b, "/id.txt", "B");
+  await write(c, "/id.txt", "C");
+
+  const router = new MountRouterProvider({
+    "/": root,
+    "/a": a,
+    "/a/b": b,
+    "/a/b/c": c,
+  });
+
+  // Longest-prefix mount should win.
+  {
+    const fh = await router.open("/a/b/c/id.txt", "r");
+    const data = await fh.readFile({ encoding: "utf8" });
+    await fh.close();
+    assert.equal(data, "C");
+  }
+  {
+    const fh = await router.open("/a/b/id.txt", "r");
+    const data = await fh.readFile({ encoding: "utf8" });
+    await fh.close();
+    assert.equal(data, "B");
+  }
+  {
+    const fh = await router.open("/a/id.txt", "r");
+    const data = await fh.readFile({ encoding: "utf8" });
+    await fh.close();
+    assert.equal(data, "A");
+  }
+
+  // Virtual dirs should exist at mount boundaries.
+  assert.equal((await router.stat("/a")).isDirectory(), true);
+  assert.equal((await router.stat("/a/b")).isDirectory(), true);
+
+  // Traversal should be normalized before routing.
+  {
+    const fh = await router.open("/a/b/c/../id.txt", "r");
+    const data = await fh.readFile({ encoding: "utf8" });
+    await fh.close();
+    assert.equal(data, "B");
+  }
+  {
+    const fh = await router.open("/a/../root.txt", "r");
+    const data = await fh.readFile({ encoding: "utf8" });
+    await fh.close();
+    assert.equal(data, "root");
+  }
+});
+
+test("MountRouterProvider virtual child mount masks conflicting base entry", async () => {
+  const rootProvider = new MemoryProvider();
+  const rootAppHandle = await rootProvider.open("/app", "w+");
+  await rootAppHandle.writeFile("this is a file named app");
+  await rootAppHandle.close();
+
+  const appProvider = new MemoryProvider();
+  const appFileHandle = await appProvider.open("/info.txt", "w+");
+  await appFileHandle.writeFile("info");
+  await appFileHandle.close();
+
+  const router = new MountRouterProvider({ "/": rootProvider, "/app": appProvider });
+
+  const entries = (await router.readdir("/", { withFileTypes: true })) as Array<{ name: string; isDirectory(): boolean }>;
+  const app = entries.find((e) => e.name === "app");
+  assert.ok(app);
+  assert.equal(app!.isDirectory(), true);
+});

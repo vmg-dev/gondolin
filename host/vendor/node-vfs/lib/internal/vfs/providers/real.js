@@ -160,8 +160,18 @@ class RealFSProvider extends VirtualProvider {
     if (typeof rootPath !== 'string' || rootPath === '') {
       throw new ERR_INVALID_ARG_VALUE('rootPath', rootPath, 'must be a non-empty string');
     }
-    // Resolve to absolute path and normalize
-    this.#rootPath = path.resolve(rootPath);
+    // Resolve to absolute path and normalize.
+    //
+    // On macOS (and some Linux setups) common temp paths (e.g. /var/...) may be
+    // symlinks into /private/..., which can cause realpath() checks/conversions
+    // to incorrectly treat in-root paths as escaped.  Prefer a canonical
+    // realpath when available.
+    const resolvedRoot = path.resolve(rootPath);
+    try {
+      this.#rootPath = fs.realpathSync(resolvedRoot);
+    } catch {
+      this.#rootPath = resolvedRoot;
+    }
   }
 
   /**
