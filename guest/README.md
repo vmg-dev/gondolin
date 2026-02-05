@@ -27,9 +27,13 @@ tooling to boot the micro-VM under QEMU.
 |-------|----------------------|
 | `brew install zig lz4 e2fsprogs` | `sudo apt install zig lz4 cpio curl e2fsprogs` |
 
+The `make image`/`make kernel` targets invoke the shared `gondolin build`
+pipeline through the host CLI. Make sure host Node dependencies are installed
+(e.g., `pnpm install` at the repo root or `pnpm -C host install`).
+
 ## Common tasks
 
-Mandatory build command (builds the initramfs image and kernel without booting):
+Mandatory build command (builds kernel, initramfs, and rootfs without booting):
 
 ```sh
 make build
@@ -41,13 +45,16 @@ Build `sandboxd` only:
 make build-bins
 ```
 
-Create the Alpine initramfs image:
+Build guest assets using a custom build config:
 
 ```sh
-make image
+make image GONDOLIN_BUILD_CONFIG=../build-config.json
 ```
 
-Fetch the Alpine kernel and boot the guest under QEMU:
+Both `make image` and `make kernel` invoke the shared `gondolin build` pipeline
+and will produce all assets in `image/out/`.
+
+Boot the guest under QEMU (builds assets if needed):
 
 ```sh
 make qemu
