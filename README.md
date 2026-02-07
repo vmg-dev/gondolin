@@ -54,11 +54,19 @@ QEMU and Node installed:
 
 ## Documentation
 
-Start with [`docs/index.md`](docs/index.md).  It links to the conceptual guides
-(security model, network stack, QEMU design and cross-platform behavior), plus
-practical docs like CLI usage, debug logging, and building custom guest images.
+Documentation: [earendil-works.github.io/gondolin](https://earendil-works.github.io/gondolin/)
 
-For the TypeScript API surface, see [`docs/sdk.md`](docs/sdk.md).
+Guides:
+- [CLI](https://earendil-works.github.io/gondolin/cli/)
+- [SDK (TypeScript)](https://earendil-works.github.io/gondolin/sdk/)
+- [SSH](https://earendil-works.github.io/gondolin/ssh/)
+- [Debug logging](https://earendil-works.github.io/gondolin/debug/)
+- [Custom images](https://earendil-works.github.io/gondolin/custom-images/)
+
+Architecture:
+- [Security design](https://earendil-works.github.io/gondolin/security/)
+- [Network stack](https://earendil-works.github.io/gondolin/network/)
+- [QEMU](https://earendil-works.github.io/gondolin/qemu/)
 
 ## Why Gondolin?
 
@@ -105,11 +113,10 @@ In the design of Gondolin we made various architectural choices that require ela
   binaries and allows trivial cross compilation.  The host is written in TypeScript
   because it allows plugging in custom behavior trivially for the VM.
 
-## Documentation
+## Repository guides
 
-- [`docs/index.md`](docs/index.md) — additional guides (debug logging, custom images, ...)
-- [`docs/sdk.md`](docs/sdk.md) — TypeScript SDK reference
-- [`host/README.md`](host/README.md) — quick start + hello world
+- [Host package](host/README.md) — installation, CLI quick start, and a TypeScript example
+- [Guest sandbox](guest/README.md) — Zig build, initramfs/image pipeline, and development notes
 
 ## Programmable Filesystem
 
@@ -130,7 +137,7 @@ const vm = await VM.create({
 });
 ```
 
-See [`docs/sdk.md`](docs/sdk.md) for full SDK/API details.
+See the [SDK (TypeScript) reference](https://earendil-works.github.io/gondolin/sdk/) for full API details.
 
 ## Custom Images
 
@@ -143,7 +150,7 @@ gondolin build --config build-config.json --output ./my-assets
 GONDOLIN_GUEST_DIR=./my-assets gondolin bash
 ```
 
-See [`docs/custom-images.md`](docs/custom-images.md) for the full configuration
+See [Custom images](https://earendil-works.github.io/gondolin/custom-images/) for the full configuration
 reference and recipes.
 
 ## Components
@@ -157,6 +164,6 @@ This codebase has been built with the support of coding agents.
 
 ## License and Links
 
-- [Documentation](./docs/index.md)
+- [Documentation](https://earendil-works.github.io/gondolin/)
 - [Issue Tracker](https://github.com/earendil-works/gondolin/issues)
 - License: [Apache-2.0](https://github.com/earendil-works/gondolin/blob/main/LICENSE)

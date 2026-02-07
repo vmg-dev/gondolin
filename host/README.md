@@ -71,6 +71,6 @@ await vm.close();
 
 ## License and Links
 
-- [Documentation](https://github.com/earendil-works/gondolin/blob/main/docs/index.md)
+- [Documentation](https://earendil-works.github.io/gondolin/)
 - [Issue Tracker](https://github.com/earendil-works/gondolin/issues)
 - License: [Apache-2.0](https://github.com/earendil-works/gondolin/blob/main/LICENSE)
