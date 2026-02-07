@@ -5,6 +5,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { EventEmitter } from "events";
+import { Duplex } from "stream";
 
 
 import {
@@ -91,6 +92,8 @@ export type SandboxServerOptions = {
   virtioSocketPath?: string;
   /** virtiofs/vfs socket path */
   virtioFsSocketPath?: string;
+  /** virtio-serial ssh socket path */
+  virtioSshSocketPath?: string;
   /** qemu net socket path */
   netSocketPath?: string;
   /** guest mac address */
@@ -158,6 +161,8 @@ export type ResolvedSandboxServerOptions = {
   virtioSocketPath: string;
   /** virtiofs/vfs socket path */
   virtioFsSocketPath: string;
+  /** virtio-serial ssh socket path */
+  virtioSshSocketPath: string;
   /** qemu net socket path */
   netSocketPath: string;
   /** guest mac address */
@@ -312,6 +317,10 @@ export function resolveSandboxServerOptions(
     tmpDir,
     `gondolin-virtio-fs-${randomUUID().slice(0, 8)}.sock`
   );
+  const defaultVirtioSsh = path.resolve(
+    tmpDir,
+    `gondolin-virtio-ssh-${randomUUID().slice(0, 8)}.sock`
+  );
   const defaultNetSock = path.resolve(
     tmpDir,
     `gondolin-net-${randomUUID().slice(0, 8)}.sock`
@@ -367,6 +376,7 @@ export function resolveSandboxServerOptions(
     cpus: options.cpus ?? 2,
     virtioSocketPath: options.virtioSocketPath ?? defaultVirtio,
     virtioFsSocketPath: options.virtioFsSocketPath ?? defaultVirtioFs,
+    virtioSshSocketPath: options.virtioSshSocketPath ?? defaultVirtioSsh,
     netSocketPath: options.netSocketPath ?? defaultNetSock,
     netMac: options.netMac ?? defaultNetMac,
     netEnabled: options.netEnabled ?? true,
@@ -625,6 +635,84 @@ class VirtioBridge {
   }
 }
 
+class TcpForwardStream extends Duplex {
+  private closedByRemote = false;
+  private closeSent = false;
+
+  constructor(
+    readonly id: number,
+    private readonly sendFrame: (message: object) => boolean,
+    private readonly onDispose: () => void
+  ) {
+    super();
+    this.on("close", () => {
+      this.onDispose();
+    });
+  }
+
+  _read(_size: number): void {
+    // no-op; data is pushed from the virtio handler
+  }
+
+  _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    if (this.closedByRemote) {
+      callback(new Error("tcp stream closed"));
+      return;
+    }
+
+    const ok = this.sendFrame({
+      v: 1,
+      t: "tcp_data",
+      id: this.id,
+      p: { data: chunk },
+    });
+
+    if (!ok) {
+      callback(new Error("virtio tcp queue exceeded"));
+      return;
+    }
+
+    callback();
+  }
+
+  _final(callback: (error?: Error | null) => void): void {
+    if (this.closedByRemote) {
+      callback();
+      return;
+    }
+
+    // half-close
+    this.sendFrame({ v: 1, t: "tcp_eof", id: this.id, p: {} });
+    callback();
+  }
+
+  _destroy(_error: Error | null, callback: (error?: Error | null) => void): void {
+    if (!this.closedByRemote && !this.closeSent) {
+      this.closeSent = true;
+      this.sendFrame({ v: 1, t: "tcp_close", id: this.id, p: {} });
+    }
+    callback();
+  }
+
+  pushRemote(data: Buffer): void {
+    if (this.closedByRemote) return;
+    this.push(data);
+  }
+
+  remoteClose(): void {
+    if (this.closedByRemote) return;
+    this.closedByRemote = true;
+    this.push(null);
+    // Don't send tcp_close back; remote already closed.
+    this.destroy();
+  }
+
+  openFailed(message: string): void {
+    this.closedByRemote = true;
+    this.destroy(new Error(message));
+  }
+}
+
 function parseMac(value: string): Buffer | null {
   const parts = value.split(":");
   if (parts.length !== 6) return null;
@@ -718,7 +806,12 @@ export class SandboxServer extends EventEmitter {
   private readonly controller: SandboxController;
   private readonly bridge: VirtioBridge;
   private readonly fsBridge: VirtioBridge;
+  private readonly sshBridge: VirtioBridge;
   private readonly network: QemuNetworkBackend | null;
+
+  private tcpStreams = new Map<number, TcpForwardStream>();
+  private tcpOpenWaiters = new Map<number, { resolve: () => void; reject: (err: Error) => void }>();
+  private nextTcpStreamId = 1;
   private readonly baseAppend: string;
   private vfsProvider: SandboxVfsProvider | null;
   private fsService: FsRpcService | null = null;
@@ -797,6 +890,7 @@ export class SandboxServer extends EventEmitter {
       cpus: this.options.cpus,
       virtioSocketPath: this.options.virtioSocketPath,
       virtioFsSocketPath: this.options.virtioFsSocketPath,
+      virtioSshSocketPath: this.options.virtioSshSocketPath,
       netSocketPath: this.options.netEnabled ? this.options.netSocketPath : undefined,
       netMac: this.options.netMac,
       append: this.baseAppend,
@@ -820,6 +914,8 @@ export class SandboxServer extends EventEmitter {
 
     this.bridge = new VirtioBridge(this.options.virtioSocketPath, maxPendingBytes);
     this.fsBridge = new VirtioBridge(this.options.virtioFsSocketPath);
+    // SSH/tcp-forward stream can be long-lived and high-throughput; allow a larger queue.
+    this.sshBridge = new VirtioBridge(this.options.virtioSshSocketPath, Math.max(maxPendingBytes, 64 * 1024 * 1024));
     this.fsService = this.vfsProvider
       ? new FsRpcService(this.vfsProvider, {
           logger: this.hasDebug("vfs") ? (message) => this.emitDebug("vfs", message) : undefined,
@@ -853,6 +949,7 @@ export class SandboxServer extends EventEmitter {
       if (state === "running") {
         this.bridge.connect();
         this.fsBridge.connect();
+        this.sshBridge.connect();
       }
       if (state === "stopped") {
         this.failInflight("sandbox_stopped", "sandbox is not running");
@@ -1017,6 +1114,76 @@ export class SandboxServer extends EventEmitter {
         });
     };
 
+    this.sshBridge.onMessage = (message: any) => {
+      if (this.hasDebug("protocol")) {
+        const id = isValidRequestId(message.id) ? message.id : "?";
+        const extra =
+          message.t === "tcp_data"
+            ? ` bytes=${Buffer.isBuffer((message as any).p?.data) ? (message as any).p.data.length : 0}`
+            : message.t === "tcp_opened"
+              ? ` ok=${Boolean((message as any).p?.ok)}`
+              : "";
+        this.emitDebug("protocol", `virtiossh rx t=${message.t} id=${id}${extra}`);
+      }
+
+      if (!isValidRequestId(message.id)) return;
+
+      if (message.t === "tcp_opened") {
+        const waiter = this.tcpOpenWaiters.get(message.id);
+        if (!waiter) return;
+        this.tcpOpenWaiters.delete(message.id);
+
+        const ok = Boolean((message as any).p?.ok);
+        const msg = typeof (message as any).p?.message === "string" ? (message as any).p.message : "tcp_open failed";
+
+        if (ok) {
+          waiter.resolve();
+        } else {
+          const stream = this.tcpStreams.get(message.id);
+          stream?.openFailed(msg);
+          this.tcpStreams.delete(message.id);
+          waiter.reject(new Error(msg));
+        }
+        return;
+      }
+
+      if (message.t === "tcp_data") {
+        const stream = this.tcpStreams.get(message.id);
+        if (!stream) return;
+        const data = (message as any).p?.data;
+        if (!Buffer.isBuffer(data)) return;
+        stream.pushRemote(data);
+        return;
+      }
+
+      if (message.t === "tcp_close") {
+        const stream = this.tcpStreams.get(message.id);
+        if (!stream) return;
+        this.tcpStreams.delete(message.id);
+        const waiter = this.tcpOpenWaiters.get(message.id);
+        if (waiter) {
+          this.tcpOpenWaiters.delete(message.id);
+          waiter.reject(new Error("tcp stream closed"));
+        }
+        stream.remoteClose();
+        return;
+      }
+    };
+
+    this.sshBridge.onError = (err) => {
+      const message = err instanceof Error ? err.message : "unknown error";
+      this.emit("error", new Error(`[ssh] virtio decode error: ${message}`));
+      // Fail any pending opens.
+      for (const [id, waiter] of this.tcpOpenWaiters.entries()) {
+        waiter.reject(new Error("ssh virtio bridge error"));
+        this.tcpOpenWaiters.delete(id);
+      }
+      for (const stream of this.tcpStreams.values()) {
+        stream.destroy(new Error("ssh virtio bridge error"));
+      }
+      this.tcpStreams.clear();
+    };
+
     this.bridge.onError = (err) => {
       const message = err instanceof Error ? err.message : "unknown error";
       this.emit("error", new Error(`[virtio] decode error: ${message}`));
@@ -1051,6 +1218,80 @@ export class SandboxServer extends EventEmitter {
       send: (message) => this.handleClientMessage(client, message),
       close: () => this.closeClient(client),
     };
+  }
+
+  /**
+   * Open a TCP stream to a loopback service inside the guest.
+   *
+   * This is implemented via a dedicated virtio-serial port and does not use the
+   * guest network stack.
+   */
+  async openTcpStream(target: { host: string; port: number; timeoutMs?: number }): Promise<Duplex> {
+    const host = target.host;
+    const port = target.port;
+    const timeoutMs = target.timeoutMs ?? 5000;
+
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      throw new Error(`invalid guest port: ${port}`);
+    }
+
+    // Allocate stream id
+    let id = this.nextTcpStreamId;
+    for (let i = 0; i < 0xffffffff; i++) {
+      if (!this.tcpStreams.has(id) && !this.tcpOpenWaiters.has(id)) break;
+      id = (id + 1) >>> 0;
+      if (id === 0) id = 1;
+    }
+    this.nextTcpStreamId = (id + 1) >>> 0;
+    if (this.nextTcpStreamId === 0) this.nextTcpStreamId = 1;
+
+    const stream = new TcpForwardStream(id, (m) => this.sshBridge.send(m), () => {
+      this.tcpStreams.delete(id);
+      const waiter = this.tcpOpenWaiters.get(id);
+      if (waiter) {
+        this.tcpOpenWaiters.delete(id);
+        waiter.reject(new Error("tcp stream closed"));
+      }
+    });
+
+    this.tcpStreams.set(id, stream);
+
+    const openedPromise = new Promise<void>((resolve, reject) => {
+      this.tcpOpenWaiters.set(id, { resolve, reject });
+    });
+
+    const ok = this.sshBridge.send({
+      v: 1,
+      t: "tcp_open",
+      id,
+      p: {
+        host,
+        port,
+      },
+    });
+
+    if (!ok) {
+      this.tcpStreams.delete(id);
+      this.tcpOpenWaiters.delete(id);
+      stream.destroy();
+      throw new Error("virtio tcp queue exceeded");
+    }
+
+    let timeout: NodeJS.Timeout | null = null;
+    try {
+      await Promise.race([
+        openedPromise,
+        new Promise<void>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("tcp_open timeout")), timeoutMs);
+        }),
+      ]);
+      return stream;
+    } catch (err) {
+      stream.destroy(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   private broadcastStatus(state: SandboxState) {
@@ -1140,6 +1381,7 @@ export class SandboxServer extends EventEmitter {
     this.network?.start();
     this.bridge.connect();
     this.fsBridge.connect();
+    this.sshBridge.connect();
   }
 
   private async closeInternal() {
@@ -1148,6 +1390,12 @@ export class SandboxServer extends EventEmitter {
     await this.controller.close();
     this.bridge.disconnect();
     this.fsBridge.disconnect();
+    this.sshBridge.disconnect();
+    for (const stream of this.tcpStreams.values()) {
+      stream.destroy();
+    }
+    this.tcpStreams.clear();
+    this.tcpOpenWaiters.clear();
     await this.fsService?.close();
     this.network?.close();
     this.started = false;

@@ -1,3 +1,8 @@
+import fs from "fs";
+import net from "net";
+import os from "os";
+import path from "path";
+import { execFileSync } from "child_process";
 import { Readable } from "stream";
 
 import {
@@ -127,6 +132,30 @@ export type ShellOptions = {
   attach?: boolean;
 };
 
+export type EnableSshOptions = {
+  /** ssh username (default: "root") */
+  user?: string;
+  /** local listen host (default: 127.0.0.1) */
+  listenHost?: string;
+  /** local listen port (0 picks an ephemeral port) */
+  listenPort?: number;
+};
+
+export type SshAccess = {
+  /** local host to connect to */
+  host: string;
+  /** local port to connect to */
+  port: number;
+  /** ssh username */
+  user: string;
+  /** path to a temporary private key file */
+  identityFile: string;
+  /** ready-to-run ssh command */
+  command: string;
+  /** close the local forwarder and remove temporary key material */
+  close(): Promise<void>;
+};
+
 // Re-export types from exec.ts
 export { ExecProcess, ExecResult, ExecOptions } from "./exec";
 
@@ -166,6 +195,7 @@ export class VM {
   private vfsReadyPromise: Promise<void> | null = null;
   private debugLog: DebugLogFn | null = null;
   private debugListener: ((component: DebugComponent, message: string) => void) | null = null;
+  private sshAccess: SshAccess | null = null;
 
   /**
    * Create a VM instance, downloading guest assets if needed.
@@ -427,6 +457,209 @@ export class VM {
     return proc;
   }
 
+  /**
+   * Enable SSH access to the VM by starting `sshd` in the guest (bound to loopback)
+   * and creating a host-local TCP forwarder.
+   */
+  async enableSsh(options: EnableSshOptions = {}): Promise<SshAccess> {
+    if (this.sshAccess) return this.sshAccess;
+
+    await this.start();
+
+    const user = options.user ?? "root";
+    const listenHost = options.listenHost ?? "127.0.0.1";
+    const listenPort = options.listenPort ?? 0;
+
+    // Generate ephemeral client keypair
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gondolin-ssh-"));
+    const keyPath = path.join(tmpDir, "id_ed25519");
+
+    try {
+      execFileSync("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", keyPath], {
+        stdio: "ignore",
+      });
+    } catch (err) {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+      throw new Error(
+        `failed to run ssh-keygen (needed for vm.enableSsh): ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    const pubKey = fs.readFileSync(keyPath + ".pub", "utf8").trim();
+
+    // Install authorized_keys + start sandboxssh + start sshd
+    const setupScript = `set -eu
+if ! command -v sshd >/dev/null 2>&1; then
+  echo "sshd not found in guest image" 1>&2
+  exit 127
+fi
+
+if ! command -v sandboxssh >/dev/null 2>&1; then
+  echo "sandboxssh not found in guest image" 1>&2
+  exit 126
+fi
+
+# Ensure loopback is up (needed for ListenAddress=127.0.0.1 and tcp forwarding)
+if command -v ip >/dev/null 2>&1; then
+  ip link set lo up || true
+else
+  ifconfig lo up || true
+fi
+
+# sshd on Alpine wants /var/empty to be root-owned
+mkdir -p /var/empty
+chown root:root /var/empty || true
+chmod 755 /var/empty || true
+
+chown root:root /root || true
+chmod 700 /root || true
+
+mkdir -p /root/.ssh /run/sshd /etc/ssh
+chown root:root /root/.ssh || true
+chmod 700 /root/.ssh
+
+cat > /root/.ssh/authorized_keys <<'EOF'
+${pubKey}
+EOF
+chmod 600 /root/.ssh/authorized_keys
+
+# Generate host keys if missing
+ssh-keygen -A >/dev/null 2>&1 || true
+
+# Start sandboxssh if it's not already running (required for host-side TCP forwarding)
+if ! ps | grep -q '[s]andboxssh'; then
+  sandboxssh >/tmp/sandboxssh.log 2>&1 &
+fi
+
+# Start sshd bound to loopback only
+#
+# Don't try to be clever about whether it's already running; it's easy to
+# accidentally match our own command line. Starting twice is harmless (it will fail
+# to bind), and we validate by probing the port from the host.
+/usr/sbin/sshd -D -e -p 22 \
+  -o ListenAddress=127.0.0.1 \
+  -o PasswordAuthentication=no \
+  -o KbdInteractiveAuthentication=no \
+  -o ChallengeResponseAuthentication=no \
+  -o PubkeyAuthentication=yes \
+  -o PermitRootLogin=prohibit-password \
+  -o PidFile=/run/sshd.pid \
+  >/tmp/sshd.log 2>&1 &
+`;
+
+    const setupResult = await this.exec(["sh", "-lc", setupScript]);
+    if (setupResult.exitCode !== 0 && setupResult.exitCode !== 127 && setupResult.exitCode !== 126) {
+      throw new Error(
+        `failed to configure ssh in guest (exit ${setupResult.exitCode}): ${setupResult.stderr.trim()}`
+      );
+    }
+    if (setupResult.exitCode === 127) {
+      throw new Error(
+        "sshd not available in guest image. Rebuild guest assets with openssh installed (default images should include it)."
+      );
+    }
+    if (setupResult.exitCode === 126) {
+      throw new Error(
+        "sandboxssh not available in guest image. Rebuild guest assets to include sandboxssh."
+      );
+    }
+
+    // Verify that the virtio tcp-forwarder is working and that sshd is reachable.
+    const server = this.server;
+    if (!server) {
+      throw new Error("sandbox server is not available");
+    }
+
+    const deadline = Date.now() + 3000;
+    let lastErr: unknown = null;
+    while (Date.now() < deadline) {
+      try {
+        const probe = await server.openTcpStream({ host: "127.0.0.1", port: 22, timeoutMs: 750 });
+        probe.destroy();
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    if (lastErr) {
+      const detail = lastErr instanceof Error ? lastErr.message : String(lastErr);
+      throw new Error(`ssh port-forward is not available: ${detail}`);
+    }
+
+    // Create local forwarder
+    const forwardServer = net.createServer((socket) => {
+      socket.setNoDelay(true);
+      // Ensure we always have an error handler; otherwise socket.destroy(err)
+      // can turn into an uncaught exception.
+      socket.on("error", () => {
+        // ignore
+      });
+
+      void (async () => {
+        const server = this.server;
+        if (!server) {
+          socket.destroy();
+          return;
+        }
+        try {
+          const tunnel = await server.openTcpStream({ host: "127.0.0.1", port: 22 });
+          tunnel.on("error", () => socket.destroy());
+          socket.on("error", (err) => tunnel.destroy(err));
+          socket.pipe(tunnel).pipe(socket);
+        } catch {
+          socket.destroy();
+        }
+      })();
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      forwardServer.once("error", reject);
+      forwardServer.listen({ host: listenHost, port: listenPort }, () => {
+        forwardServer.off("error", reject);
+        resolve();
+      });
+    });
+
+    const addr = forwardServer.address();
+    if (!addr || typeof addr === "string") {
+      forwardServer.close();
+      throw new Error("unexpected local forward server address");
+    }
+
+    const host = listenHost;
+    const port = addr.port;
+
+    const access: SshAccess = {
+      host,
+      port,
+      user,
+      identityFile: keyPath,
+      command:
+        `ssh -p ${port} -i ${keyPath} ` +
+        `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${user}@${host}`,
+      close: async () => {
+        await new Promise<void>((resolve) => forwardServer.close(() => resolve()));
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+          // ignore
+        }
+        if (this.sshAccess === access) {
+          this.sshAccess = null;
+        }
+      },
+    };
+
+    this.sshAccess = access;
+    return access;
+  }
+
   private execInternal(command: ExecInput, options: ExecOptions): ExecProcess {
     const { cmd, argv } = normalizeCommand(command, options);
     const id = this.allocateId();
@@ -517,6 +750,13 @@ export class VM {
   }
 
   private async closeInternal() {
+    if (this.sshAccess) {
+      try {
+        await this.sshAccess.close();
+      } catch {
+        // ignore
+      }
+    }
     if (this.server) {
       await this.server.close();
     }

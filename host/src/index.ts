@@ -6,7 +6,7 @@
  */
 
 // Main VM interface
-export { VM, type VMOptions, type VMState } from "./vm";
+export { VM, type VMOptions, type VMState, type EnableSshOptions, type SshAccess } from "./vm";
 export {
   type ExecOptions,
   type ExecResult,
