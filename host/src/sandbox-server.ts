@@ -123,6 +123,14 @@ export type SandboxServerOptions = {
   autoRestart?: boolean;
   /** kernel cmdline append string */
   append?: string;
+
+  /**
+   * Enable overlayfs for the guest root (writes go to a tmpfs upperdir)
+   *
+   * If omitted, defaults to `GONDOLIN_ROOT_OVERLAY`.
+   */
+  rootOverlay?: boolean | "tmpfs";
+
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes?: number;
   /** http fetch implementation for asset downloads */
@@ -184,6 +192,10 @@ export type ResolvedSandboxServerOptions = {
   autoRestart: boolean;
   /** kernel cmdline append string */
   append?: string;
+
+  /** enable overlayfs for the guest root (writes go to a tmpfs upperdir) */
+  rootOverlay?: "tmpfs";
+
   /** max stdin buffered per process in `bytes` */
   maxStdinBytes: number;
   /** max intercepted http request body size in `bytes` */
@@ -254,6 +266,18 @@ function detectQemuArch(qemuPath: string): "arm64" | "x64" | null {
   if (lower.includes("aarch64") || lower.includes("arm64")) return "arm64";
   if (lower.includes("x86_64") || lower.includes("x64") || lower.includes("amd64")) return "x64";
   return null;
+}
+
+function normalizeRootOverlay(value: SandboxServerOptions["rootOverlay"]): "tmpfs" | undefined {
+  if (value === true || value === "tmpfs") return "tmpfs";
+  if (value === false) return undefined;
+
+  const env = process.env.GONDOLIN_ROOT_OVERLAY;
+  if (!env) return undefined;
+
+  const lower = env.toLowerCase().trim();
+  if (lower === "1" || lower === "true" || lower === "tmpfs") return "tmpfs";
+  return undefined;
 }
 
 function findCommonAssetDir(assets: Partial<GuestAssets>): string | null {
@@ -387,6 +411,7 @@ export function resolveSandboxServerOptions(
     console: options.console,
     autoRestart: options.autoRestart ?? false,
     append: options.append,
+    rootOverlay: normalizeRootOverlay(options.rootOverlay),
     maxStdinBytes: options.maxStdinBytes ?? DEFAULT_MAX_STDIN_BYTES,
     maxHttpBodyBytes: options.maxHttpBodyBytes ?? DEFAULT_MAX_HTTP_BODY_BYTES,
     maxHttpResponseBodyBytes:
@@ -884,7 +909,15 @@ export class SandboxServer extends EventEmitter {
 
     const hostArch = detectHostArch();
     const consoleDevice = hostArch === "arm64" ? "ttyAMA0" : "ttyS0";
-    this.baseAppend = this.options.append ?? `console=${consoleDevice} initramfs_async=1`;
+
+    let baseAppend = this.options.append ?? `console=${consoleDevice} initramfs_async=1`;
+    if (this.options.rootOverlay === "tmpfs") {
+      // Don't add a duplicate root.overlay if the user already provided one.
+      if (!baseAppend.split(/\s+/).some((part) => part.startsWith("root.overlay="))) {
+        baseAppend = `${baseAppend} root.overlay=tmpfs`;
+      }
+    }
+    this.baseAppend = baseAppend.trim();
 
     const sandboxConfig: SandboxConfig = {
       qemuPath: this.options.qemuPath,
