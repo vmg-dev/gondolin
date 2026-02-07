@@ -133,9 +133,9 @@ In the design of Gondolin we made various architectural choices that require ela
 
 ## Repository Guides
 
-- [Host package](host/README.md) — installation, CLI quick start, and a TypeScript example
-- [Guest sandbox](guest/README.md) — Zig build, initramfs/image pipeline, and development notes
-- [Pi + Gondolin extension example](host/examples/pi-gondolin.ts) — run pi's tools inside a micro-VM (mounts your project at `/workspace`)
+- [Host package](host/README.md): installation, CLI quick start, and a TypeScript example
+- [Guest sandbox](guest/README.md): Zig build, initramfs/image pipeline, and development notes
+- [Pi + Gondolin extension example](host/examples/pi-gondolin.ts): run pi's tools inside a micro-VM (mounts your project at `/workspace`)
 
 ## Programmable Filesystem
 
