@@ -51,7 +51,15 @@ sudo apt install lz4 curl python3 e2fsprogs
 
 ## Configuration Reference
 
-The build configuration is a JSON file with the following structure:
+The build configuration is a JSON file. To generate a starting point, run:
+
+```bash
+gondolin build --init-config > build-config.json
+```
+
+Then pass it to the builder via `--config build-config.json`.
+
+The file has the following structure:
 
 ```json
 {
