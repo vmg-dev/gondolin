@@ -129,6 +129,12 @@ jobs:
             echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Get npm version
+        id: npm_version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -151,7 +157,7 @@ jobs:
             ### NPM Package
 
             ```bash
-            npm install @earendil-works/gondolin@${{ steps.version.outputs.version }}
+            npm install @earendil-works/gondolin@${{ steps.npm_version.outputs.version }}
             ```
 
             The guest image will be automatically downloaded on first use.
