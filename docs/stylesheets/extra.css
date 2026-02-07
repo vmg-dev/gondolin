@@ -78,7 +78,6 @@
 .md-header__button.md-logo,
 .md-nav__button.md-logo,
 .md-nav__title .md-logo {
-  display: none;
 }
 
 /* Make the header site name look like text, but behave like a link */

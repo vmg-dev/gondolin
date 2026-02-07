@@ -50,6 +50,9 @@ nav = [
 # loading and self-host it from ./docs/assets/fonts/commit-mono.
 font = false
 
+# Use an off-the-shelf Material icon as the docs logo
+# See https://pictogrammers.com/library/mdi/ for available icons
+
 # Earendil favicon
 favicon = "images/favicon/favicon.ico"
 
@@ -58,6 +61,9 @@ features = [
     "content.action.view",
     "content.action.edit",
 ]
+
+[project.theme.icon]
+logo = "material/cube-outline"
 
 [project.theme.palette]
 # Force light scheme and use grayscale accents
