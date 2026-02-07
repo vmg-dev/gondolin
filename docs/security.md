@@ -112,6 +112,7 @@ This is what Gondolin actually enforces.
 
 - Guest code runs inside a QEMU VM.
 - The QEMU invocation is intentionally minimal (see `host/src/sandbox-controller.ts`):
+
   - `-nodefaults` (avoid unexpected devices)
   - `-no-reboot`, `-nographic`
   - virtio devices only (virtio-serial, virtio-net, virtio-blk, virtio-rng)
@@ -133,6 +134,7 @@ and a backend that attaches to QEMU's `-netdev stream` Unix socket
 Key enforcement points:
 
 1. **Protocol allowlist (TCP flow sniffing)**
+
     - For each outgoing TCP flow, the host sniffs the first bytes and classifies it as:
         - `http` (HTTP/1.x request line)
         - `tls` (TLS ClientHello record)
@@ -145,10 +147,12 @@ Key enforcement points:
     - Only UDP destination port `53` is forwarded; other UDP is blocked. See note on DNS below.
 
 3. **HTTP/HTTPS is bridged by the host**
+
     - For `http` flows, the host parses the request and replays it using `fetch` (undici).
     - For `tls` flows, the host performs a **TLS MITM** (see below) to recover the HTTP request, then replays via `fetch`.
 
 4. **Host allowlist and internal-range blocking**
+
     - `createHttpHooks()` (see `host/src/http-hooks.ts`) produces an `httpHooks.isAllowed()` implementation.
     - By default, it blocks internal ranges (`blockInternalRanges: true`), including:
         - IPv4: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0/8, broadcast
@@ -157,10 +161,12 @@ Key enforcement points:
 
 5. **DNS rebinding protection**
     Gondolin checks policy in *two* places:
+
     - `ensureRequestAllowed()` resolves the hostname and checks `isAllowed({ hostname, ip, ... })`.
     - When using the default `fetch`, Gondolin installs a custom undici dispatcher with a guarded `lookup()` (`createLookupGuard()`), which re-checks `isAllowed()` against the *actual resolved IPs used by the connection*.
 
 6. **Redirect policy is enforced by the host**
+
     - The host follows redirects itself (`redirect: "manual"` + explicit handling).
     - Each redirect target is revalidated against policy before fetching.
 
@@ -211,6 +217,7 @@ The programmable filesystem path is:
 - Host `FsRpcService` (`host/src/vfs/rpc-service.ts`) validates and dispatches
   operations to a `VirtualProvider`.
 - Providers can be:
+
   - in-memory (`MemoryProvider`)
   - real host filesystem (`RealFSProvider`)
   - wrappers (`ReadonlyProvider`, mount routers, custom policy providers)

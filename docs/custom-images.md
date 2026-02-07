@@ -218,10 +218,12 @@ checksums for verification.
 ### `mke2fs`: Command Not Found
 
 Install e2fsprogs:
+
 - macOS: `brew install e2fsprogs`
 - Linux: `sudo apt install e2fsprogs`
 
 On macOS, add to PATH:
+
 ```bash
 export PATH="/opt/homebrew/opt/e2fsprogs/sbin:$PATH"
 ```
@@ -229,6 +231,7 @@ export PATH="/opt/homebrew/opt/e2fsprogs/sbin:$PATH"
 ### Build Times Out / VM Doesn't Boot
 
 Ensure the built architecture matches your host:
+
 - Apple Silicon Macs: use `aarch64`
 - Intel Macs / x86_64 Linux: use `x86_64`
 

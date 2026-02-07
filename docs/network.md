@@ -29,9 +29,9 @@ At a high level, the data path looks like this:
 2. Bytes become **Ethernet frames** emitted by the guest kernel via virtio-net.
 3. QEMU forwards those frames to the host through a private transport.
 4. The host parses frames into L2/L3/L4 and either:
-  - services the traffic locally (e.g. DHCP replies),
-  - relays it in a restricted way (DNS), or
-  - bridges it into **host-side HTTP(S)** using an HTTP parser + TLS MITM.
+    - services the traffic locally (e.g. DHCP replies),
+    - relays it in a restricted way (DNS), or
+    - bridges it into **host-side HTTP(S)** using an HTTP parser + TLS MITM.
 
 Conceptually:
 
