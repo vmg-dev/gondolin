@@ -114,7 +114,7 @@ When using `pipe`, Gondolin does **not** buffer stdout/stderr into the final
 `ExecResult` (use the default buffered mode if you want captured output).
 
 Backpressure: in streaming modes (`stdout: "pipe"` / `stderr: "pipe"` or a writable),
-Gondolin uses a host↔guest credit window to keep buffered output bounded.
+Gondolin uses a host<->guest credit window to keep buffered output bounded.
 You can tune the window size with `windowBytes` (default: 256 KiB).
 
 If you need both streaming *and* to keep a copy of output, capture it yourself
@@ -136,6 +136,41 @@ for await (const { stream, text } of vm.exec("echo out; echo err >&2", { stdout:
   process.stdout.write(`[${stream}] ${text}`);
 }
 ```
+
+#### `proc.attach()`
+
+`vm.exec()` returns an `ExecProcess`, which can be **attached** to a terminal (or any Node streams):
+
+```ts
+const proc = vm.exec(["/bin/bash", "-i"], {
+  stdin: true,
+  pty: true,
+  stdout: "pipe",
+  stderr: "pipe",
+});
+
+proc.attach(
+  process.stdin as NodeJS.ReadStream,
+  process.stdout as NodeJS.WriteStream,
+  process.stderr as NodeJS.WriteStream,
+);
+
+const result = await proc;
+console.log("exitCode:", result.exitCode);
+```
+
+What `attach()` does:
+
+- wires `stdin` -> guest process (requires `stdin: true`)
+- forwards `stdout`/`stderr` to the provided writable streams when they are set to `"pipe"`
+- if `stdout`/`stderr` are `"inherit"` (or a custom writable), output is already forwarded by the VM, and `attach()` only handles input/resize
+- enables raw mode on TTY stdin, and forwards terminal resize events to the guest (only meaningful with `pty: true`)
+- automatically cleans up listeners and restores raw mode when the process exits
+
+Notes:
+
+- `attach()` can only be called once per process.
+- Don't simultaneously consume `proc.stdout` / async-iterate the process and call `attach()`; attaching will consume the pipe.
 
 #### Avoiding Large Buffers
 
@@ -193,6 +228,127 @@ await access.close();
 
 See also: [SSH access](./ssh.md).
 
+### `vm.enableIngress()`
+
+You can expose HTTP servers running inside the guest VM to the host machine.
+This feature is called "ingress" internally.
+
+When you call `vm.enableIngress()`:
+
+- the host starts a local HTTP gateway (default: `127.0.0.1:<ephemeral>`)
+- requests are routed based on `/etc/gondolin/listeners` inside the guest
+
+Ingress requires the default `/etc/gondolin` mount. If you disable VFS entirely
+(`vfs: null`) or override `/etc/gondolin` with a custom mount, `enableIngress()`
+will fail.
+
+Minimal example:
+
+```ts
+import { VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create();
+
+const ingress = await vm.enableIngress({
+  listenHost: "127.0.0.1",
+  listenPort: 0, // 0 picks an ephemeral port
+});
+
+console.log("Ingress:", ingress.url);
+
+// Route all requests to the guest server on port 8000
+vm.setIngressRoutes([{ prefix: "/", port: 8000, stripPrefix: true }]);
+
+// Start a server inside the guest
+// NOTE: the guest currently executes one command at a time; a long-running
+// vm.exec() (like a server) will block additional exec requests.
+const server = vm.exec(["/bin/sh", "-lc", "python -m http.server 8000"], {
+  buffer: false,
+  stdout: "inherit",
+  stderr: "inherit",
+});
+
+// Now you can reach the guest service from the host at ingress.url
+// ...
+
+await ingress.close();
+await vm.close();
+```
+
+#### Ingress Hooks
+
+`enableIngress()` can install **host-side hook points** on the ingress gateway.
+This is useful for:
+
+- allow/deny decisions based on client IP / path / route
+- rewriting upstream target paths (or headers)
+- adding/removing response headers
+- optionally buffering responses so you can rewrite bodies
+
+Hooks are configured via `enableIngress({ hooks: ... })`:
+
+- `hooks.isAllowed(info) -> boolean`: return `false` to deny (default response: `403 forbidden`)
+  - for a custom deny response, throw `new IngressRequestBlockedError(...)`
+- `hooks.onRequest(request) -> patch`: rewrite headers and/or upstream target
+  - can also enable per-request response buffering via `bufferResponseBody: true`
+- `hooks.onResponse(response, request) -> patch`: rewrite status/headers and optionally replace the body
+
+Streaming vs buffering:
+
+- by default, responses are streamed directly (no buffering)
+- if you enable buffering (either globally via `enableIngress({ bufferResponseBody: true })` or per-request via `onRequest()`), the full upstream response body is buffered before `onResponse()` runs and provided as `response.body`
+
+Header patch semantics:
+
+- set a header to a `string`/`string[]` to set/overwrite it
+- set a header to `null` to delete it
+
+Example:
+
+```ts
+import { IngressRequestBlockedError, VM } from "@earendil-works/gondolin";
+
+const vm = await VM.create();
+
+await vm.enableIngress({
+  hooks: {
+    isAllowed: ({ clientIp, path }) => {
+      if (path.startsWith("/admin")) {
+        throw new IngressRequestBlockedError(
+          `admin blocked for ${clientIp}`,
+          403,
+          "Forbidden",
+          "nope\n"
+        );
+      }
+      return true;
+    },
+
+    onRequest: (req) => ({
+      // Rewrite /api/* -> /* inside the guest
+      backendTarget: req.backendTarget.startsWith("/api/") ? req.backendTarget.slice(4) : req.backendTarget,
+      headers: { "x-added": "1", "x-remove": null },
+
+      // Only buffer responses we plan to inspect/modify
+      bufferResponseBody: req.backendTarget.endsWith(".json"),
+      maxBufferedResponseBodyBytes: 8 * 1024 * 1024,
+    }),
+
+    onResponse: (res) => ({
+      headers: { "x-ingress": "1" },
+      body: res.body ? Buffer.from(res.body.toString("utf8").toUpperCase()) : undefined,
+    }),
+  },
+});
+```
+
+You can read or replace the current routing table programmatically:
+
+- `vm.getIngressRoutes()`
+- `vm.setIngressRoutes(routes)`
+
+See also: [Ingress](./ingress.md).
+
 ## Network Policy
 
 The network stack only allows HTTP and TLS traffic. TCP flows are classified and
@@ -217,8 +373,8 @@ const { httpHooks, env } = createHttpHooks({
     console.log(req.url);
     return req;
   },
-  onResponse: async (req, res) => {
-    console.log(res.status);
+  onResponse: async (res, req) => {
+    console.log(req.url, res.status);
     return res;
   },
 });

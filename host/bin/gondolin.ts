@@ -86,6 +86,11 @@ function bashUsage() {
   console.log("  --dns MODE                      DNS mode: synthetic|trusted|open (default: synthetic)");
   console.log("  --dns-trusted-server IP         Trusted resolver IPv4 (repeatable; trusted mode)");
   console.log();
+  console.log("Ingress:");
+  console.log(
+    "  --listen [HOST:PORT]            Start host ingress gateway (default: 127.0.0.1:0)"
+  );
+  console.log();
   console.log("Debugging:");
   console.log("  --ssh                           Enable SSH access via a localhost port forward");
   console.log("  --ssh-user USER                 SSH username (default: root)");
@@ -97,6 +102,8 @@ function bashUsage() {
   console.log("  gondolin bash --mount-hostfs /data:/data:ro --mount-memfs /tmp");
   console.log("  gondolin bash --allow-host api.github.com");
   console.log("  gondolin bash --host-secret GITHUB_TOKEN@api.github.com");
+  console.log("  gondolin bash --listen");
+  console.log("  gondolin bash --listen 127.0.0.1:3000");
   console.log("  gondolin bash --ssh");
 }
 
@@ -236,6 +243,46 @@ function parseHostSecret(spec: string): SecretSpec {
   }
 
   return { name, value, hosts };
+}
+
+function parseListenSpec(spec: string): { host: string; port: number } {
+  const trimmed = spec.trim();
+  if (!trimmed) {
+    throw new Error("--listen requires a non-empty value");
+  }
+
+  let host = "127.0.0.1";
+  let portStr = trimmed;
+
+  // Support IPv6 bracket form: [::1]:1234
+  if (portStr.startsWith("[")) {
+    const bracketEnd = portStr.indexOf("]");
+    if (bracketEnd === -1) {
+      throw new Error(`Invalid --listen value: ${spec} (missing ']')`);
+    }
+    host = portStr.slice(1, bracketEnd);
+    if (!host) {
+      throw new Error(`Invalid --listen value: ${spec} (empty host in brackets)`);
+    }
+    const rest = portStr.slice(bracketEnd + 1);
+    if (!rest.startsWith(":")) {
+      throw new Error(`Invalid --listen value: ${spec} (expected :PORT after ])`);
+    }
+    portStr = rest.slice(1);
+  } else if (portStr.includes(":")) {
+    // HOST:PORT or :PORT
+    const idx = portStr.lastIndexOf(":");
+    const rawHost = portStr.slice(0, idx);
+    if (rawHost) host = rawHost;
+    portStr = portStr.slice(idx + 1);
+  }
+
+  const port = Number(portStr);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`Invalid --listen value: ${spec} (port must be 0-65535)`);
+  }
+
+  return { host, port };
 }
 
 function buildVmOptions(common: CommonOptions) {
@@ -634,7 +681,14 @@ async function runExec(argv: string[] = process.argv.slice(2)) {
   }
 }
 
-type BashArgs = CommonOptions;
+type BashArgs = CommonOptions & {
+  /** enable ingress gateway */
+  listen?: boolean;
+  /** host interface to bind ingress gateway */
+  listenHost?: string;
+  /** host port to bind ingress gateway (0 = ephemeral) */
+  listenPort?: number;
+};
 
 function parseBashArgs(argv: string[]): BashArgs {
   const args: BashArgs = {
@@ -644,6 +698,7 @@ function parseBashArgs(argv: string[]): BashArgs {
     secrets: [],
     dnsTrustedServers: [],
     ssh: false,
+    listen: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -707,6 +762,22 @@ function parseBashArgs(argv: string[]): BashArgs {
         args.dnsTrustedServers.push(ip);
         break;
       }
+      case "--listen": {
+        args.listen = true;
+        const spec = argv[i + 1];
+
+        // --listen optionally accepts a value. If the next token looks like a
+        // long option ("--foo"), treat it as another flag; otherwise treat it
+        // as the listen spec even if it starts with "-" (so "--listen -1"
+        // errors instead of being silently ignored).
+        if (spec && !spec.startsWith("--") && spec !== "-h") {
+          i += 1;
+          const parsed = parseListenSpec(spec);
+          args.listenHost = parsed.host;
+          args.listenPort = parsed.port;
+        }
+        break;
+      }
       case "--ssh":
         args.ssh = true;
         break;
@@ -760,6 +831,7 @@ async function runBash(argv: string[]) {
   const args = parseBashArgs(argv);
   const vmOptions = buildVmOptions(args);
   let vm: VM | null = null;
+  let ingressAccess: { url: string; close(): Promise<void> } | null = null;
   let exitCode = 1;
 
   try {
@@ -775,6 +847,17 @@ async function runBash(argv: string[]) {
         listenPort: args.sshPort,
       });
       process.stderr.write(`SSH enabled: ${access.command}\n`);
+    }
+
+    if (args.listen) {
+      ingressAccess = await vm.enableIngress({
+        listenHost: args.listenHost,
+        listenPort: args.listenPort,
+      });
+      process.stderr.write(`Ingress enabled: ${ingressAccess.url}\n`);
+      process.stderr.write(
+        "Configure routes by editing /etc/gondolin/listeners inside the VM.\n"
+      );
     }
 
     // Start the shell without using ExecProcess.attach() so we can implement
@@ -849,6 +932,14 @@ async function runBash(argv: string[]) {
     renderCliError(err);
     exitCode = 1;
   } finally {
+    if (ingressAccess) {
+      try {
+        await ingressAccess.close();
+      } catch {
+        // ignore close errors
+      }
+    }
+
     if (vm) {
       try {
         await vm.close();
